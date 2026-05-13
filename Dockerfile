@@ -24,8 +24,19 @@ FROM ros:foxy
 
 SHELL ["/bin/bash", "-c"]
 
+# apt mirror: aliyun + disable HTTP cache to avoid hash mismatch behind CDN/proxy
+RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g; s@//security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    echo 'Acquire::http::No-Cache "true";' > /etc/apt/apt.conf.d/99nocache && \
+    echo 'Acquire::http::Pipeline-Depth "0";' >> /etc/apt/apt.conf.d/99nocache && \
+    echo 'Acquire::BrokenProxy "true";' >> /etc/apt/apt.conf.d/99nocache && \
+    echo 'Acquire::Retries "5";' >> /etc/apt/apt.conf.d/99nocache
+
+# pip mirror: tsinghua
+RUN mkdir -p /root/.pip && \
+    printf '[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple\ntrusted-host = pypi.tuna.tsinghua.edu.cn\n' > /root/.pip/pip.conf
+
 # dependencies
-RUN apt-get update --fix-missing && \
+RUN apt-get update && \
     apt-get install -y git \
                        nano \
                        vim \
@@ -37,6 +48,8 @@ RUN apt-get -y dist-upgrade
 RUN pip3 install transforms3d
 
 # f1tenth gym
+# pin pip < 24.1 to tolerate gym==0.19.0's malformed metadata ('opencv-python>=3.')
+RUN pip3 install 'pip<24.1'
 RUN git clone https://github.com/f1tenth/f1tenth_gym
 RUN cd f1tenth_gym && \
     pip3 install -e .
@@ -46,7 +59,7 @@ RUN mkdir -p sim_ws/src/f1tenth_gym_ros
 COPY . /sim_ws/src/f1tenth_gym_ros
 RUN source /opt/ros/foxy/setup.bash && \
     cd sim_ws/ && \
-    apt-get update --fix-missing && \
+    apt-get update && \
     rosdep install -i --from-path src --rosdistro foxy -y && \
     colcon build
 

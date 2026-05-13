@@ -1,160 +1,213 @@
-# F1TENTH gym environment ROS2 communication bridge
-This is a containerized ROS communication bridge for the F1TENTH gym environment that turns it into a simulation in ROS2.
+# F1TENTH Gym ROS 2 仿真环境（中文版）
 
-# Installation
+基于 ROS 2 Foxy 和 Docker 的 F1TENTH 开源赛车仿真环境，支持 RViz 可视化、键盘遥控、多车对抗，适合控制算法、路径规划和强化学习的开发与验证。
 
-**Supported System:**
+> 上游仓库：[f1tenth/f1tenth_gym_ros](https://github.com/f1tenth/f1tenth_gym_ros)
+> 本仓库针对国内网络环境做了 apt / pip 换源，优化了 Docker 构建成功率。
 
-- Ubuntu (tested on 20.04) native with ROS 2
-- Ubuntu (tested on 20.04) with an NVIDIA gpu and nvidia-docker2 support
-- Windows 10, macOS, and Ubuntu without an NVIDIA gpu (using noVNC)
+---
 
-This installation guide will be split into instruction for installing the ROS 2 package natively, and for systems with or without an NVIDIA gpu in Docker containers.
+## 系统要求
 
-## Native on Ubuntu 20.04
+- Linux（推荐 Ubuntu 22.04）
+- Docker（≥ 20.10）
+- [rocker](https://github.com/osrf/rocker)，用于把 X11 和 NVIDIA GPU 透传进容器
+- NVIDIA 显卡 + `nvidia-container-toolkit`（可选，但强烈推荐；无 N 卡可去掉 `--nvidia` 参数走软件渲染）
 
-**Install the following dependencies:**
-- **ROS 2** Follow the instructions [here](https://docs.ros.org/en/foxy/Installation.html) to install ROS 2 Foxy.
-- **F1TENTH Gym**
-  ```bash
-  git clone https://github.com/f1tenth/f1tenth_gym
-  cd f1tenth_gym && pip3 install -e .
-  ```
+### 安装 rocker 和 NVIDIA 支持
 
-**Installing the simulation:**
-- Create a workspace: ```cd $HOME && mkdir -p sim_ws/src```
-- Clone the repo into the workspace:
-  ```bash
-  cd $HOME/sim_ws/src
-  git clone https://github.com/f1tenth/f1tenth_gym_ros
-  ```
-- Update correct parameter for path to map file:
-  Go to `sim.yaml` [https://github.com/f1tenth/f1tenth_gym_ros/blob/main/config/sim.yaml](https://github.com/f1tenth/f1tenth_gym_ros/blob/main/config/sim.yaml) in your cloned repo, change the `map_path` parameter to point to the correct location. It should be `'<your_home_dir>/sim_ws/src/f1tenth_gym_ros/maps/levine'`
-- Install dependencies with rosdep:
-  ```bash
-  source /opt/ros/foxy/setup.bash
-  cd ..
-  rosdep install -i --from-path src --rosdistro foxy -y
-  ```
-- Build the workspace: ```colcon build```
-
-## With an NVIDIA gpu:
-
-**Install the following dependencies:**
-
-- **Docker** Follow the instructions [here](https://docs.docker.com/install/linux/docker-ce/ubuntu/) to install Docker. A short tutorial can be found [here](https://docs.docker.com/get-started/) if you're not familiar with Docker. If you followed the post-installation steps you won't have to prepend your docker and docker-compose commands with sudo.
-- **nvidia-docker2**, follow the instructions [here](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) if you have a support GPU. It is also possible to use Intel integrated graphics to forward the display, see details instructions from the Rocker repo. If you are on windows with an NVIDIA GPU, you'll have to use WSL (Windows Subsystem for Linux). Please refer to the guide [here](https://developer.nvidia.com/cuda/wsl), [here](https://docs.nvidia.com/cuda/wsl-user-guide/index.html), and [here](https://dilililabs.com/zh/blog/2021/01/26/deploying-docker-with-gpu-support-on-windows-subsystem-for-linux/).
-- **rocker** [https://github.com/osrf/rocker](https://github.com/osrf/rocker). This is a tool developed by OSRF to run Docker images with local support injected. We use it for GUI forwarding. If you're on Windows, WSL should also support this.
-
-**Installing the simulation:**
-
-1. Clone this repo
-2. Build the docker image by:
 ```bash
-$ cd f1tenth_gym_ros
-$ docker build -t f1tenth_gym_ros -f Dockerfile .
-```
-3. To run the containerized environment, start a docker container by running the following. (example showned here with nvidia-docker support). By running this, the current directory that you're in (should be `f1tenth_gym_ros`) is mounted in the container at `/sim_ws/src/f1tenth_gym_ros`. Which means that the changes you make in the repo on the host system will also reflect in the container.
-```bash
-$ rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+# rocker
+sudo apt install python3-rocker
+# 或：pip install rocker
+
+# NVIDIA Container Toolkit（有 N 卡才需要）
+# 参考 https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
 ```
 
-## Without an NVIDIA gpu:
-
-**Install the following dependencies:**
-
-If your system does not support nvidia-docker2, noVNC will have to be used to forward the display.
-- Again you'll need **Docker**. Follow the instruction from above.
-- Additionally you'll need **docker-compose**. Follow the instruction [here](https://docs.docker.com/compose/install/) to install docker-compose.
-
-**Installing the simulation:**
-
-1. Clone this repo 
-2. Bringup the novnc container and the sim container with docker-compose:
+安装后确认 docker 能识别 nvidia runtime：
 ```bash
-docker-compose up
-``` 
-3. In a separate terminal, run the following, and you'll have the a bash session in the simulation container. `tmux` is available for convenience.
-```bash
-docker exec -it f1tenth_gym_ros-sim-1 /bin/bash
+docker info | grep -i runtime
+# 应该看到：Runtimes: nvidia runc ...
 ```
-4. In your browser, navigate to [http://localhost:8080/vnc.html](http://localhost:8080/vnc.html), you should see the noVNC logo with the connect button. Click the connect button to connect to the session.
 
-# Launching the Simulation
-
-1. `tmux` is included in the contianer, so you can create multiple bash sessions in the same terminal.
-2. To launch the simulation, make sure you source both the ROS2 setup script and the local workspace setup script. Run the following in the bash session from the container:
+把当前用户加进 docker 组可省掉 sudo：
 ```bash
-$ source /opt/ros/foxy/setup.bash
-$ source install/local_setup.bash
-$ ros2 launch f1tenth_gym_ros gym_bridge_launch.py
+sudo usermod -aG docker $USER
+newgrp docker
 ```
-A rviz window should pop up showing the simulation either on your host system or in the browser window depending on the display forwarding you chose.
 
-You can then run another node by creating another bash session in `tmux`.
+---
 
-# Configuring the simulation
-- The configuration file for the simulation is at `f1tenth_gym_ros/config/sim.yaml`.
-- Topic names and namespaces can be configured but is recommended to leave uncahnged.
-- The map can be changed via the `map_path` parameter. You'll have to use the full path to the map file in the container. The map follows the ROS convention. It is assumed that the image file and the `yaml` file for the map are in the same directory with the same name. See the note below about mounting a volume to see where to put your map file.
-- The `num_agent` parameter can be changed to either 1 or 2 for single or two agent racing.
-- The ego and opponent starting pose can also be changed via parameters, these are in the global map coordinate frame.
+## 快速开始
 
-The entire directory of the repo is mounted to a workspace `/sim_ws/src` as a package. All changes made in the repo on the host system will also reflect in the container. After changing the configuration, run `colcon build` again in the container workspace to make sure the changes are reflected.
+### 1. 克隆仓库
 
-# Topics published by the simulation
-
-In **single** agent:
-
-`/scan`: The ego agent's laser scan
-
-`/ego_racecar/odom`: The ego agent's odometry
-
-`/map`: The map of the environment
-
-A `tf` tree is also maintained.
-
-In **two** agents:
-
-In addition to the topics available in the single agent scenario, these topics are also available:
-
-`/opp_scan`: The opponent agent's laser scan
-
-`/ego_racecar/opp_odom`: The opponent agent's odometry for the ego agent's planner
-
-`/opp_racecar/odom`: The opponent agents' odometry
-
-`/opp_racecar/opp_odom`: The ego agent's odometry for the opponent agent's planner
-
-# Topics subscribed by the simulation
-
-In **single** agent:
-
-`/drive`: The ego agent's drive command via `AckermannDriveStamped` messages
-
-`/initalpose`: This is the topic for resetting the ego's pose via RViz's 2D Pose Estimate tool. Do **NOT** publish directly to this topic unless you know what you're doing.
-
-TODO: kb teleop topics
-
-In **two** agents:
-
-In addition to all topics in the single agent scenario, these topics are also available:
-
-`/opp_drive`: The opponent agent's drive command via `AckermannDriveStamped` messages. Note that you'll need to publish to **both** the ego's drive topic and the opponent's drive topic for the cars to move when using 2 agents.
-
-`/goal_pose`: This is the topic for resetting the opponent agent's pose via RViz's 2D Goal Pose tool. Do **NOT** publish directly to this topic unless you know what you're doing.
-
-# Keyboard Teleop
-
-The keyboard teleop node from `teleop_twist_keyboard` is also installed as part of the simulation's dependency. To enable keyboard teleop, set `kb_teleop` to `True` in `sim.yaml`. After launching the simulation, in another terminal, run:
 ```bash
+cd ~
+git clone https://github.com/art3m1s-tju/f1tenth_gym_ros_cn.git
+cd f1tenth_gym_ros_cn
+```
+
+### 2. 构建 Docker 镜像
+
+```bash
+docker build --no-cache -t f1tenth_gym_ros -f Dockerfile .
+```
+
+构建过程会：
+- 基于 `ros:foxy` 基础镜像
+- 自动把 apt 源换成阿里云、pip 源换成清华（已写进 Dockerfile）
+- 安装 RViz、ackermann_msgs、xacro、nav2 等 ROS 2 依赖
+- 从上游拉 `f1tenth_gym` Python 仿真库并安装
+- `colcon build` 编译 ROS 2 包
+
+首次构建约 10–20 分钟，取决于网速。完成后镜像约 2.7 GB。
+
+如果遇到 apt hash mismatch，多半是网络缓存层捣乱，重试 `docker build --no-cache ...` 即可；仍不行可参考「常见问题」。
+
+### 3. 启动主仿真（终端 1）
+
+使用 rocker 把 GPU 和 X11 透传进容器，同时把当前目录挂载到容器内 `/sim_ws/src/f1tenth_gym_ros`，方便实时改代码和配置：
+
+```bash
+cd ~/f1tenth_gym_ros_cn
+rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+无 NVIDIA 显卡去掉 `--nvidia`：
+```bash
+rocker --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+进入容器后执行：
+```bash
+source /opt/ros/foxy/setup.bash
+source /sim_ws/install/local_setup.bash
+ros2 launch f1tenth_gym_ros gym_bridge_launch.py
+```
+
+正常会弹出 RViz 窗口，显示小车、激光扫描和地图。
+
+> **关于重新编译：** 镜像构建时已经 `colcon build` 过一次。如果你只是跑仿真，不需要再编译。只有在改了挂载进来的源码（比如改了 `f1tenth_gym_ros/` 下的 Python 节点）后，才需要：
+> ```bash
+> cd /sim_ws
+> colcon build
+> source install/local_setup.bash
+> ```
+
+### 4. 启动键盘遥控（终端 2）
+
+打开一个新的**本地**终端，进入已经跑起来的容器：
+
+```bash
+docker ps                       # 找到正在运行的容器 ID
+docker exec -it <容器ID> /bin/bash
+```
+
+在容器里启动遥控节点：
+```bash
+source /opt/ros/foxy/setup.bash
+source /sim_ws/install/local_setup.bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
-Then, press `i` to move forward, `u` and `o` to move forward and turn, `,` to move backwards, `m` and `.` to move backwards and turn, and `k` to stop in the terminal window running the teleop node.
 
-# Developing and creating your own agent in ROS 2
+**键位：**
+- `i` / `,` 前进 / 倒车
+- `j` / `l` 左转 / 右转
+- `k` 刹车
+- `u` / `o` / `m` / `.` 斜向
+- `q` / `z` 提高 / 降低线速度和角速度
+- `w` / `x` 只调线速度
+- `e` / `c` 只调角速度
 
-There are multiple ways to launch your own agent to control the vehicles.
+**必须让这个终端窗口保持焦点**，否则按键不会被捕获。
 
-- The first one is creating a new package for your agent in the `/sim_ws` workspace inside the sim container. After launch the simulation, launch the agent node in another bash session while the sim is running.
-- The second one is to create a new ROS 2 container for you agent node. Then create your own package and nodes inside. Launch the sim container and the agent container both. With default networking configurations for `docker`, the behavior is to put The two containers on the same network, and they should be able to discover and talk to each other on different topics. If you're using noVNC, create a new service in `docker-compose.yml` for your agent node. You'll also have to put your container on the same network as the sim and novnc containers.
+---
+
+## 配置说明
+
+核心配置在 `config/sim.yaml`，挂载后在宿主机直接编辑即可生效（重启 launch 后）。
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `map_path` | 地图文件路径（容器内绝对路径，不含扩展名） | `/sim_ws/src/f1tenth_gym_ros/maps/levine` |
+| `map_img_ext` | 地图图片扩展名 | `.png` |
+| `num_agent` | 对手车辆数（0 = 单车，1 = 1v1 对抗） | `1` |
+| `sx`, `sy`, `stheta` | 主车初始位姿 | `0, 0, 0` |
+| `sx1`, `sy1`, `stheta1` | 对手车初始位姿 | `2.0, 0.5, 0` |
+| `scan_beams` | LiDAR 波束数 | `1080` |
+| `scan_fov` | LiDAR 视场角（弧度） | `4.7` |
+| `kb_teleop` | 启用键盘遥控话题 | `True` |
+
+### 切换地图
+仓库自带 `maps/levine` 和 `maps/Spielberg_map`。换地图只需改 `map_path`：
+```yaml
+map_path: '/sim_ws/src/f1tenth_gym_ros/maps/Spielberg_map'
+```
+
+### 自定义地图
+放一对同名的 `.png` 和 `.yaml` 到 `maps/` 目录即可，YAML 格式跟 ROS `map_server` 一致。
+
+---
+
+## 话题列表
+
+主车（`ego_racecar` 命名空间）：
+- 订阅 `/drive` (`ackermann_msgs/AckermannDriveStamped`) 控制指令
+- 订阅 `/initialpose` (`geometry_msgs/PoseWithCovarianceStamped`) RViz 2D Pose Estimate 重置位姿
+- 发布 `/ego_racecar/scan` (`sensor_msgs/LaserScan`) LiDAR
+- 发布 `/ego_racecar/odom` (`nav_msgs/Odometry`) 里程计
+- 发布 `/map` (`nav_msgs/OccupancyGrid`) 占据栅格地图
+- 发布 `/tf` 坐标变换
+
+多车模式（`num_agent: 1`）下对手车用 `opp_racecar` 前缀对应话题。
+
+---
+
+## 常见问题
+
+**Q: `docker build` 报 apt Hash Sum mismatch？**
+A: 国内网络到 Ubuntu 官方源的 CDN 层经常返回不同步的缓存文件。本仓库 Dockerfile 已经换到阿里云 + 禁用 HTTP 缓存。如果仍然失败，可换成清华源：
+```
+sed -i 's@mirrors.aliyun.com@mirrors.tuna.tsinghua.edu.cn@g' Dockerfile
+```
+并加 `--no-cache` 重构建。
+
+**Q: `pip install gym==0.19.0` 报 "invalid metadata" 或 "Expected end or semicolon"？**
+A: `gym==0.19.0` 的 `setup.py` 有非法版本写法（`opencv-python>=3.`），pip ≥ 24.1 拒绝解析。本仓库 Dockerfile 已经把 pip 锁到 `<24.1`。
+
+**Q: 启动时提示 `No map received`？**
+A: 检查 `config/sim.yaml` 里 `map_path`，必须是**容器内**的绝对路径（通常是 `/sim_ws/src/f1tenth_gym_ros/maps/xxx`，不要带 `.png`）。
+
+**Q: RViz 白屏 / 报 OpenGL 错误？**
+A:
+- 先确认 `rocker` 带了 `--nvidia --x11`
+- 确认宿主机 `nvidia-smi` 正常
+- 对于 RTX 40/50 系等新卡，若 Mesa 软件渲染报错，必须走 `--nvidia`
+
+**Q: 键盘按键没反应？**
+A: 让跑 `teleop_twist_keyboard` 的那个终端窗口保持鼠标焦点，ROS 是从 stdin 读键盘的。
+
+**Q: 要怎么重新 `colcon build`？**
+A: 只有改了挂载进来的 ROS 源码才需要。在容器内：
+```bash
+cd /sim_ws && colcon build && source install/local_setup.bash
+```
+
+---
+
+## 许可证
+
+MIT License，沿用上游仓库。引用请见：
+
+```bibtex
+@inproceedings{okelly2020f1tenth,
+  title={F1TENTH: An Open-source Evaluation Environment for Continuous Control and Reinforcement Learning},
+  author={O'Kelly, Matthew and Zheng, Hongrui and Karthik, Dhruv and Mangharam, Rahul},
+  booktitle={NeurIPS 2019 Competition and Demonstration Track},
+  pages={77--89},
+  year={2020},
+  organization={PMLR}
+}
+```
