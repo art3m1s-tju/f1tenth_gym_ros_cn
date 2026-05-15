@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -70,6 +71,7 @@ def run_ros_validation(
     enable_speed_ramp: bool = True,
     max_accel: float = 1.0,
     max_decel: float = 2.0,
+    launch_log_path: Path | None = None,
 ) -> Path | None:
     """启动完整 ROS 仿真，等待完成目标圈数后运行评估脚本。
 
@@ -138,10 +140,17 @@ def run_ros_validation(
         f"min_speed={min_speed}, max_lat_accel={max_lateral_accel}"
     )
 
+    launch_log_file = None
+    stdout_target = subprocess.DEVNULL
+    if launch_log_path is not None:
+        launch_log_path.parent.mkdir(parents=True, exist_ok=True)
+        launch_log_file = launch_log_path.open("w", encoding="utf-8")
+        stdout_target = launch_log_file
+
     proc = subprocess.Popen(
         launch_cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stdout_target,
+        stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
 
@@ -156,8 +165,18 @@ def run_ros_validation(
         else:
             print("  Timeout reached, stopping simulation...")
     finally:
-        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-        proc.wait(timeout=10)
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait(timeout=5)
+            except ProcessLookupError:
+                pass
+        if launch_log_file is not None:
+            launch_log_file.flush()
+            launch_log_file.close()
 
     if not log_file.exists():
         print("  ERROR: No log file produced.")
@@ -175,14 +194,138 @@ def run_ros_validation(
     return output_dir
 
 
+def _speed_label(speed: float) -> str:
+    return f"{speed:.1f}".replace(".", "p")
+
+
+def _default_batch_name() -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"original_map_rviz_table_curvlimit_ramp_{stamp}"
+
+
+def run_batch_ros_validation(
+    table_path: Path,
+    speeds: list[float],
+    batch_root: Path,
+    track_csv: str,
+    trajectory_csv: str,
+    timeout_seconds: float,
+    lap_count: int,
+    min_speed: float,
+    max_lateral_accel: float,
+    max_steering_angle: float,
+    use_tf_pose: bool,
+    enable_curvature_speed_limit: bool,
+    enable_speed_ramp: bool,
+    max_accel: float,
+    max_decel: float,
+) -> None:
+    """Run ROS/RViz validation for multiple speeds and archive each run."""
+    batch_root.mkdir(parents=True, exist_ok=True)
+    print(f"Batch output root: {batch_root}")
+
+    manifest_path = batch_root / "manifest.csv"
+    with manifest_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "speed",
+                "run_dir",
+                "tracking_log",
+                "evaluation_dir",
+                "launch_log",
+                "timeout_s",
+                "laps",
+                "curvature_limit",
+                "speed_ramp",
+                "max_lateral_accel",
+                "max_accel",
+                "max_decel",
+            ]
+        )
+
+        for speed in speeds:
+            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            label = (
+                f"v{_speed_label(speed)}_table_stadium_"
+                f"curv{int(enable_curvature_speed_limit)}_"
+                f"ramp{int(enable_speed_ramp)}_"
+                f"alat{str(max_lateral_accel).replace('.', 'p')}_"
+                f"{run_stamp}"
+            )
+            run_dir = batch_root / label
+            logs_dir = run_dir / "logs"
+            eval_dir = run_dir / "evaluation"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            eval_dir.mkdir(parents=True, exist_ok=True)
+
+            tracking_log = logs_dir / f"{label}_tracking.csv"
+            launch_log = logs_dir / f"{label}_launch.log"
+
+            print("\n" + "=" * 72)
+            print(f"Running ROS/RViz validation: speed={speed:.1f} m/s")
+            print(f"Run dir: {run_dir}")
+            result_dir = run_ros_validation(
+                table_path=table_path,
+                target_speed=speed,
+                output_dir=eval_dir,
+                track_csv=track_csv,
+                trajectory_csv=trajectory_csv,
+                log_path=str(tracking_log),
+                timeout_seconds=timeout_seconds,
+                lap_count=lap_count,
+                min_speed=min_speed,
+                max_lateral_accel=max_lateral_accel,
+                max_steering_angle=max_steering_angle,
+                use_tf_pose=use_tf_pose,
+                enable_curvature_speed_limit=enable_curvature_speed_limit,
+                enable_speed_ramp=enable_speed_ramp,
+                max_accel=max_accel,
+                max_decel=max_decel,
+                launch_log_path=launch_log,
+            )
+            writer.writerow(
+                [
+                    f"{speed:.2f}",
+                    str(run_dir),
+                    str(tracking_log),
+                    str(result_dir or ""),
+                    str(launch_log),
+                    f"{timeout_seconds:.1f}",
+                    lap_count,
+                    int(enable_curvature_speed_limit),
+                    int(enable_speed_ramp),
+                    f"{max_lateral_accel:.3f}",
+                    f"{max_accel:.3f}",
+                    f"{max_decel:.3f}",
+                ]
+            )
+            f.flush()
+
+    print(f"\nBatch manifest saved to: {manifest_path}")
+
+
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--table", required=True)
+    p.add_argument("--mode", choices=["single", "batch"], default="single")
     p.add_argument("--speed", type=float, default=1.0)
+    p.add_argument(
+        "--speeds",
+        nargs="+",
+        type=float,
+        default=[0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        help="Speed list used by --mode batch.",
+    )
     p.add_argument("--timeout", type=float, default=90.0)
     p.add_argument("--laps", type=int, default=5)
     p.add_argument("--output-dir", default=None)
+    p.add_argument(
+        "--batch-name",
+        default=None,
+        help="Batch folder name under --output-dir for --mode batch.",
+    )
     p.add_argument(
         "--track-csv",
         default="/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv",
@@ -213,22 +356,45 @@ if __name__ == "__main__":
     p.add_argument("--max-decel", type=float, default=2.0)
     args = p.parse_args()
 
-    out = Path(args.output_dir) if args.output_dir else None
-    run_ros_validation(
-        Path(args.table),
-        args.speed,
-        out,
-        track_csv=args.track_csv,
-        trajectory_csv=args.trajectory_csv,
-        log_path=args.log_path,
-        timeout_seconds=args.timeout,
-        lap_count=args.laps,
-        min_speed=args.min_speed,
-        max_lateral_accel=args.max_lateral_accel,
-        max_steering_angle=args.max_steering_angle,
-        use_tf_pose=args.use_tf_pose,
-        enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
-        enable_speed_ramp=not args.disable_speed_ramp,
-        max_accel=args.max_accel,
-        max_decel=args.max_decel,
-    )
+    if args.mode == "batch":
+        output_root = Path(args.output_dir) if args.output_dir else Path(
+            "/sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros"
+        )
+        batch_name = args.batch_name or _default_batch_name()
+        run_batch_ros_validation(
+            table_path=Path(args.table),
+            speeds=args.speeds,
+            batch_root=output_root / batch_name,
+            track_csv=args.track_csv,
+            trajectory_csv=args.trajectory_csv,
+            timeout_seconds=args.timeout,
+            lap_count=args.laps,
+            min_speed=args.min_speed,
+            max_lateral_accel=args.max_lateral_accel,
+            max_steering_angle=args.max_steering_angle,
+            use_tf_pose=args.use_tf_pose,
+            enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
+            enable_speed_ramp=not args.disable_speed_ramp,
+            max_accel=args.max_accel,
+            max_decel=args.max_decel,
+        )
+    else:
+        out = Path(args.output_dir) if args.output_dir else None
+        run_ros_validation(
+            Path(args.table),
+            args.speed,
+            out,
+            track_csv=args.track_csv,
+            trajectory_csv=args.trajectory_csv,
+            log_path=args.log_path,
+            timeout_seconds=args.timeout,
+            lap_count=args.laps,
+            min_speed=args.min_speed,
+            max_lateral_accel=args.max_lateral_accel,
+            max_steering_angle=args.max_steering_angle,
+            use_tf_pose=args.use_tf_pose,
+            enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
+            enable_speed_ramp=not args.disable_speed_ramp,
+            max_accel=args.max_accel,
+            max_decel=args.max_decel,
+        )

@@ -948,3 +948,51 @@ python3 -m lqr_sweep.validate_ros \
 - `completed laps >= 3`。
 - `steering_saturation_ratio` 接近 0。
 - `max_abs_e_y < 0.25 m`，`mean_abs_e_y < 0.05 m`。
+
+### 阶段一批量 RViz 验证补充
+
+单独验证 `1.5m/s` 不足以覆盖原地图风险，因此 `validate_ros.py` 增加批量模式：
+
+```
+--mode batch
+```
+
+批量模式用于从 `0.5m/s` 到 `3.0m/s` 每隔 `0.5m/s` 做一组原地图 RViz 验证。每组默认可以跑满 `300s`，并将该组实验单独归档：
+
+```
+evaluation_ros/<batch_name>/
+  manifest.csv
+  v0p5_table_stadium_curv1_ramp1_alat4p0_<timestamp>/
+    logs/
+      *_launch.log
+      *_tracking.csv
+    evaluation/
+      lookahead_summary.csv
+      lookahead_summary.json
+      *_lateral_error.png
+      *_heading_error.png
+      *_path_overlay.png
+      *_timing.png
+```
+
+推荐命令：
+
+```
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --timeout 300 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_300s
+```
+
+其中 `--laps 99` 用于避免完成几圈后提前停止，让每组尽量跑满 `300s`。如果某组撞车或 ROS 节点退出，仍会保留 launch log 和已有 tracking log，便于定位问题。

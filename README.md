@@ -315,6 +315,48 @@ python3 -m lqr_sweep.validate_ros \
 （`use_tf_pose=false`），这样可以先排除 TF 链路不完整导致 LQR 不发 `/drive`
 的问题。若要显式使用 TF 位姿，可加 `--use-tf-pose`。
 
+#### 原地图 RViz 批量验证
+
+阶段一推荐使用批量 RViz 验证脚本，从 `0.5m/s` 到 `3.0m/s` 每隔 `0.5m/s`
+测试一组。每组运行 300 秒，自动保存 launch 输出、tracking log、评估 summary 和可视化图片。
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --timeout 300 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_300s
+```
+
+输出目录结构示例：
+
+```text
+code/outputs/evaluation_ros/original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_300s/
+├── manifest.csv
+├── v0p5_table_stadium_curv1_ramp1_alat4p0_YYYYmmdd_HHMMSS/
+│   ├── logs/
+│   │   ├── ..._launch.log
+│   │   └── ..._tracking.csv
+│   └── evaluation/
+│       ├── lookahead_summary.csv
+│       ├── lookahead_summary.json
+│       └── *_lateral_error.png / *_heading_error.png / *_path_overlay.png
+└── v1p0_.../
+```
+
+这里 `--laps 99` 的作用是不要因为完成几圈就提前停止，而是尽量跑满 `--timeout 300`
+秒。若希望完成指定圈数后自动停止，把 `--laps` 改成目标圈数即可。
+
 #### 扫描时间估算
 
 | 模式 | 速度点数 | 网格规模 | 预计耗时 |
