@@ -297,12 +297,23 @@ python3 -m lqr_sweep.run_sweep --mode validate \
 ```bash
 cd /sim_ws/src/f1tenth_gym_ros/code
 python3 -m lqr_sweep.validate_ros \
-  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep/lqr_gain_table.yaml \
-  --speed 3.0 \
-  --laps 5 \
-  --timeout 180 \
-  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/lqr_table_v3p0_5laps
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 1.5 \
+  --laps 3 \
+  --timeout 240 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --log-path /sim_ws/src/f1tenth_gym_ros/code/outputs/logs/ros_validate_original_map_1p5.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/original_map_table_1p5
 ```
+
+原地图验证默认开启曲率限速和速度斜坡，并默认使用 `/ego_racecar/odom` 位姿
+（`use_tf_pose=false`），这样可以先排除 TF 链路不完整导致 LQR 不发 `/drive`
+的问题。若要显式使用 TF 位姿，可加 `--use-tf-pose`。
 
 #### 扫描时间估算
 

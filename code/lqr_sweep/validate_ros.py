@@ -57,10 +57,19 @@ def run_ros_validation(
     table_path: Path,
     target_speed: float = 1.0,
     output_dir: Path | None = None,
+    track_csv: str = "/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv",
     trajectory_csv: str = "/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv",
     log_path: str = "/sim_ws/src/f1tenth_gym_ros/code/outputs/logs/lqr_tracking_log.csv",
     timeout_seconds: float = 90.0,
     lap_count: int = 5,
+    min_speed: float = 0.4,
+    max_lateral_accel: float = 4.0,
+    max_steering_angle: float = 0.36,
+    use_tf_pose: bool = False,
+    enable_curvature_speed_limit: bool = True,
+    enable_speed_ramp: bool = True,
+    max_accel: float = 1.0,
+    max_decel: float = 2.0,
 ) -> Path | None:
     """启动完整 ROS 仿真，等待完成目标圈数后运行评估脚本。
 
@@ -68,10 +77,19 @@ def run_ros_validation(
         table_path: 待验证的 LQR 增益表路径，用于打印追踪当前验证对象。
         target_speed: ROS 仿真节点使用的目标速度。
         output_dir: 评估结果输出目录；未提供时使用默认容器路径。
-        trajectory_csv: 全局参考轨迹 CSV 路径。
+        track_csv: 规划器读取的赛道 CSV 路径。
+        trajectory_csv: 规划器输出并用于评估的全局参考轨迹 CSV 路径。
         log_path: ROS 仿真产生的 LQR 跟踪日志路径。
         timeout_seconds: 等待目标圈数完成的最长时间。
         lap_count: 需要连续完成的圈数。
+        min_speed: 曲率限速后的最低速度。
+        max_lateral_accel: 曲率限速使用的横向加速度上限。
+        max_steering_angle: 最大前轮转角。
+        use_tf_pose: 是否用 TF 查询车辆位姿；默认关闭，直接用 odom 位姿。
+        enable_curvature_speed_limit: 是否启用曲率限速。
+        enable_speed_ramp: 是否启用速度斜坡。
+        max_accel: 速度斜坡最大加速度。
+        max_decel: 速度斜坡最大减速度。
 
     Returns:
         成功产生日志后返回评估输出目录；若未产生日志则返回 ``None``。
@@ -95,6 +113,16 @@ def run_ros_validation(
     launch_cmd = [
         "ros2", "launch", launch_file,
         f"target_speed:={target_speed}",
+        f"min_speed:={min_speed}",
+        f"max_lateral_accel:={max_lateral_accel}",
+        f"max_steering_angle:={max_steering_angle}",
+        f"use_tf_pose:={str(use_tf_pose).lower()}",
+        f"enable_curvature_speed_limit:={str(enable_curvature_speed_limit).lower()}",
+        f"enable_speed_ramp:={str(enable_speed_ramp).lower()}",
+        f"max_accel:={max_accel}",
+        f"max_decel:={max_decel}",
+        f"track_csv:={track_csv}",
+        f"trajectory_csv:={trajectory_csv}",
         f"log_path:={log_path}",
         f"lqr_gain_table_path:={table_path}",
     ]
@@ -103,6 +131,12 @@ def run_ros_validation(
     print(f"Launching ROS simulation (timeout={timeout_seconds}s, laps={required_laps})...")
     print(f"  Table: {table_path}")
     print(f"  Target speed: {target_speed}")
+    print(
+        "  Speed handling: "
+        f"curvature_limit={enable_curvature_speed_limit}, "
+        f"speed_ramp={enable_speed_ramp}, "
+        f"min_speed={min_speed}, max_lat_accel={max_lateral_accel}"
+    )
 
     proc = subprocess.Popen(
         launch_cmd,
@@ -149,6 +183,34 @@ if __name__ == "__main__":
     p.add_argument("--timeout", type=float, default=90.0)
     p.add_argument("--laps", type=int, default=5)
     p.add_argument("--output-dir", default=None)
+    p.add_argument(
+        "--track-csv",
+        default="/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv",
+    )
+    p.add_argument(
+        "--trajectory-csv",
+        default="/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv",
+    )
+    p.add_argument(
+        "--log-path",
+        default="/sim_ws/src/f1tenth_gym_ros/code/outputs/logs/lqr_tracking_log.csv",
+    )
+    p.add_argument("--min-speed", type=float, default=0.4)
+    p.add_argument("--max-lateral-accel", type=float, default=4.0)
+    p.add_argument("--max-steering-angle", type=float, default=0.36)
+    p.add_argument("--use-tf-pose", action="store_true")
+    p.add_argument(
+        "--disable-curvature-speed-limit",
+        action="store_true",
+        help="Disable curvature-based speed limiting during ROS validation.",
+    )
+    p.add_argument(
+        "--disable-speed-ramp",
+        action="store_true",
+        help="Disable acceleration/deceleration ramp during ROS validation.",
+    )
+    p.add_argument("--max-accel", type=float, default=1.0)
+    p.add_argument("--max-decel", type=float, default=2.0)
     args = p.parse_args()
 
     out = Path(args.output_dir) if args.output_dir else None
@@ -156,6 +218,17 @@ if __name__ == "__main__":
         Path(args.table),
         args.speed,
         out,
+        track_csv=args.track_csv,
+        trajectory_csv=args.trajectory_csv,
+        log_path=args.log_path,
         timeout_seconds=args.timeout,
         lap_count=args.laps,
+        min_speed=args.min_speed,
+        max_lateral_accel=args.max_lateral_accel,
+        max_steering_angle=args.max_steering_angle,
+        use_tf_pose=args.use_tf_pose,
+        enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
+        enable_speed_ramp=not args.disable_speed_ramp,
+        max_accel=args.max_accel,
+        max_decel=args.max_decel,
     )

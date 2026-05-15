@@ -886,3 +886,65 @@ python3 -m lqr_sweep.run_sweep --mode single \
 ```
 
 如果这些插值点也稳定，可以进入原地图 ROS 验证阶段。
+
+## 23. 阶段 1：原地图 ROS 验证脚本增强
+
+### 目标
+
+将 stadium 标定得到的 `lqr_gain_table.yaml` 放回原地图完整 ROS 链路中验证，检查：
+
+- LQR controller 是否正常启动并发布 `/drive`。
+- 原地图轨迹上是否能完成多圈。
+- 曲率限速和 speed ramp 开启后是否能避免急弯硬冲。
+- 生成的 tracking log 是否可以用 `tracker_evaluate.py` 评估。
+
+### 修改
+
+`code/lqr_sweep/validate_ros.py` 增强 CLI 参数透传能力：
+
+```
+--track-csv
+--trajectory-csv
+--log-path
+--min-speed
+--max-lateral-accel
+--max-steering-angle
+--use-tf-pose
+--disable-curvature-speed-limit
+--disable-speed-ramp
+--max-accel
+--max-decel
+```
+
+默认行为用于原地图安全验证：
+
+- 开启曲率限速。
+- 开启速度斜坡。
+- 默认 `use_tf_pose=false`，直接使用 `/ego_racecar/odom` 位姿，避免 TF 链路不完整导致 LQR 不发控制。
+
+### 原地图验证命令
+
+```
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 1.5 \
+  --laps 3 \
+  --timeout 240 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --log-path /sim_ws/src/f1tenth_gym_ros/code/outputs/logs/ros_validate_original_map_1p5.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/original_map_table_1p5
+```
+
+### 成功标准
+
+- 终端出现 `LQR controller started`。
+- `/drive` 有稳定发布。
+- `completed laps >= 3`。
+- `steering_saturation_ratio` 接近 0。
+- `max_abs_e_y < 0.25 m`，`mean_abs_e_y < 0.05 m`。
