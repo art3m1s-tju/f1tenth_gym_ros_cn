@@ -72,6 +72,8 @@ def run_ros_validation(
     max_accel: float = 1.0,
     max_decel: float = 2.0,
     launch_log_path: Path | None = None,
+    evaluator_log_path: Path | None = None,
+    enable_rviz: bool = True,
 ) -> Path | None:
     """启动完整 ROS 仿真，等待完成目标圈数后运行评估脚本。
 
@@ -114,6 +116,7 @@ def run_ros_validation(
     launch_file = "/sim_ws/src/f1tenth_gym_ros/launch/pnc_sim_launch.py"
     launch_cmd = [
         "ros2", "launch", launch_file,
+        f"enable_rviz:={str(enable_rviz).lower()}",
         f"target_speed:={target_speed}",
         f"min_speed:={min_speed}",
         f"max_lateral_accel:={max_lateral_accel}",
@@ -189,18 +192,60 @@ def run_ros_validation(
         "--output-dir", str(output_dir),
     ]
     print("  Running evaluation...")
-    subprocess.run(eval_cmd, check=False)
+    evaluator_log_file = None
+    eval_stdout = None
+    if evaluator_log_path is not None:
+        evaluator_log_path.parent.mkdir(parents=True, exist_ok=True)
+        evaluator_log_file = evaluator_log_path.open("w", encoding="utf-8")
+        eval_stdout = evaluator_log_file
+
+    eval_result = subprocess.run(
+        eval_cmd,
+        check=False,
+        stdout=eval_stdout,
+        stderr=subprocess.STDOUT if eval_stdout is not None else None,
+    )
+    if evaluator_log_file is not None:
+        evaluator_log_file.flush()
+        evaluator_log_file.close()
+
+    if eval_result.returncode != 0:
+        failure_path = output_dir / "evaluation_failed.txt"
+        failure_path.write_text(
+            "tracker_evaluate.py failed\n"
+            f"returncode={eval_result.returncode}\n"
+            f"log={log_file}\n"
+            f"evaluator_log={evaluator_log_path or ''}\n",
+            encoding="utf-8",
+        )
+        print(f"  WARNING: evaluation failed, see: {failure_path}")
     print(f"  Results saved to: {output_dir}")
     return output_dir
 
 
 def _speed_label(speed: float) -> str:
-    return f"{speed:.1f}".replace(".", "p")
+    text = f"{speed:.2f}".rstrip("0").rstrip(".")
+    return text.replace(".", "p")
 
 
 def _default_batch_name() -> str:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"original_map_rviz_table_curvlimit_ramp_{stamp}"
+
+
+def _run_label(
+    speed: float,
+    enable_curvature_speed_limit: bool,
+    enable_speed_ramp: bool,
+    max_lateral_accel: float,
+) -> str:
+    return (
+        f"v{_speed_label(speed)}_table_stadium_"
+        f"curv{int(enable_curvature_speed_limit)}_"
+        f"ramp{int(enable_speed_ramp)}_"
+        f"alat{str(max_lateral_accel).replace('.', 'p')}_"
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
 
 
 def run_batch_ros_validation(
@@ -219,6 +264,7 @@ def run_batch_ros_validation(
     enable_speed_ramp: bool,
     max_accel: float,
     max_decel: float,
+    enable_rviz: bool,
 ) -> None:
     """Run ROS/RViz validation for multiple speeds and archive each run."""
     batch_root.mkdir(parents=True, exist_ok=True)
@@ -234,6 +280,7 @@ def run_batch_ros_validation(
                 "tracking_log",
                 "evaluation_dir",
                 "launch_log",
+                "evaluator_log",
                 "timeout_s",
                 "laps",
                 "curvature_limit",
@@ -245,13 +292,11 @@ def run_batch_ros_validation(
         )
 
         for speed in speeds:
-            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            label = (
-                f"v{_speed_label(speed)}_table_stadium_"
-                f"curv{int(enable_curvature_speed_limit)}_"
-                f"ramp{int(enable_speed_ramp)}_"
-                f"alat{str(max_lateral_accel).replace('.', 'p')}_"
-                f"{run_stamp}"
+            label = _run_label(
+                speed,
+                enable_curvature_speed_limit,
+                enable_speed_ramp,
+                max_lateral_accel,
             )
             run_dir = batch_root / label
             logs_dir = run_dir / "logs"
@@ -261,6 +306,7 @@ def run_batch_ros_validation(
 
             tracking_log = logs_dir / f"{label}_tracking.csv"
             launch_log = logs_dir / f"{label}_launch.log"
+            evaluator_log = logs_dir / f"{label}_evaluator.log"
 
             print("\n" + "=" * 72)
             print(f"Running ROS/RViz validation: speed={speed:.1f} m/s")
@@ -283,6 +329,8 @@ def run_batch_ros_validation(
                 max_accel=max_accel,
                 max_decel=max_decel,
                 launch_log_path=launch_log,
+                evaluator_log_path=evaluator_log,
+                enable_rviz=enable_rviz,
             )
             writer.writerow(
                 [
@@ -291,6 +339,7 @@ def run_batch_ros_validation(
                     str(tracking_log),
                     str(result_dir or ""),
                     str(launch_log),
+                    str(evaluator_log),
                     f"{timeout_seconds:.1f}",
                     lap_count,
                     int(enable_curvature_speed_limit),
@@ -352,6 +401,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable acceleration/deceleration ramp during ROS validation.",
     )
+    p.add_argument(
+        "--disable-rviz",
+        action="store_true",
+        help="Run ROS validation without launching RViz.",
+    )
     p.add_argument("--max-accel", type=float, default=1.0)
     p.add_argument("--max-decel", type=float, default=2.0)
     args = p.parse_args()
@@ -377,6 +431,7 @@ if __name__ == "__main__":
             enable_speed_ramp=not args.disable_speed_ramp,
             max_accel=args.max_accel,
             max_decel=args.max_decel,
+            enable_rviz=not args.disable_rviz,
         )
     else:
         out = Path(args.output_dir) if args.output_dir else None
@@ -397,4 +452,5 @@ if __name__ == "__main__":
             enable_speed_ramp=not args.disable_speed_ramp,
             max_accel=args.max_accel,
             max_decel=args.max_decel,
+            enable_rviz=not args.disable_rviz,
         )

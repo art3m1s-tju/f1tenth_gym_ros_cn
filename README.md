@@ -320,6 +320,26 @@ python3 -m lqr_sweep.validate_ros \
 阶段一推荐使用批量 RViz 验证脚本，从 `0.5m/s` 到 `3.0m/s` 每隔 `0.5m/s`
 测试一组。每组运行 300 秒，自动保存 launch 输出、tracking log、评估 summary 和可视化图片。
 
+注意：`--mode batch` 是阶段一分支 `stage/original-map-validate` 里的新功能。
+如果你还在主目录 `/home/art3m1s/f1tenth_gym_ros` 启动容器，容器里会挂载 main
+工作区，旧版 `validate_ros.py` 不认识 `--mode`、`--speeds`、`--batch-name`。
+
+测试阶段一时需要从阶段一 worktree 启动容器：
+
+```bash
+cd /home/art3m1s/f1tenth_stage1_original_map_validate
+rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+无 N 卡则使用：
+
+```bash
+cd /home/art3m1s/f1tenth_stage1_original_map_validate
+rocker --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+进入容器后再运行批量验证：
+
 ```bash
 cd /sim_ws/src/f1tenth_gym_ros/code
 python3 -m lqr_sweep.validate_ros \
@@ -334,6 +354,7 @@ python3 -m lqr_sweep.validate_ros \
   --max-lateral-accel 4.0 \
   --max-accel 1.0 \
   --max-decel 2.0 \
+  --disable-rviz \
   --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
   --batch-name original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_300s
 ```
@@ -346,6 +367,7 @@ code/outputs/evaluation_ros/original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_30
 ├── v0p5_table_stadium_curv1_ramp1_alat4p0_YYYYmmdd_HHMMSS/
 │   ├── logs/
 │   │   ├── ..._launch.log
+│   │   ├── ..._evaluator.log
 │   │   └── ..._tracking.csv
 │   └── evaluation/
 │       ├── lookahead_summary.csv
@@ -356,6 +378,18 @@ code/outputs/evaluation_ros/original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_30
 
 这里 `--laps 99` 的作用是不要因为完成几圈就提前停止，而是尽量跑满 `--timeout 300`
 秒。若希望完成指定圈数后自动停止，把 `--laps` 改成目标圈数即可。
+
+如果临时把 `--timeout` 改成 `150`，建议把 `--batch-name` 也同步改成：
+
+```text
+original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_150s
+```
+
+这样后续看结果目录时不会把 150 秒测试误认为 300 秒测试。
+
+如果只需要自动统计和出图，可以加 `--disable-rviz` 关闭 RViz 渲染。若
+`tracker_evaluate.py` 失败，脚本会在对应 `evaluation/` 目录写入
+`evaluation_failed.txt`，并在 `logs/*_evaluator.log` 中保存失败原因，不再只留下空目录。
 
 #### 扫描时间估算
 

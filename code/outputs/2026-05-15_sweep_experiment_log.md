@@ -996,3 +996,47 @@ python3 -m lqr_sweep.validate_ros \
 ```
 
 其中 `--laps 99` 用于避免完成几圈后提前停止，让每组尽量跑满 `300s`。如果某组撞车或 ROS 节点退出，仍会保留 launch log 和已有 tracking log，便于定位问题。
+
+### Worktree 使用注意
+
+`--mode batch` 是阶段一分支 `stage/original-map-validate` 的新功能。如果容器仍从主目录启动：
+
+```
+/home/art3m1s/f1tenth_gym_ros
+```
+
+则容器内挂载的是 main 工作区，旧版 `validate_ros.py` 不包含批量参数，会出现：
+
+```
+unrecognized arguments: --mode batch --speeds ...
+```
+
+阶段一测试必须从阶段一 worktree 启动容器：
+
+```
+cd /home/art3m1s/f1tenth_stage1_original_map_validate
+rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+另外，如果将单轮测试时间从 `300s` 改为 `150s`，`--batch-name` 也应同步改成包含 `150s`，避免结果目录命名和真实测试时长不一致。
+
+### Headless 批量测试修正
+
+RViz 只用于人工观察；批量统计时可以关闭，减少图形渲染和窗口状态对 ROS 进程的干扰。`pnc_sim_launch.py` 新增：
+
+```
+enable_rviz:=false
+```
+
+`validate_ros.py` 对应新增：
+
+```
+--disable-rviz
+```
+
+后续自动批量测试建议默认加上 `--disable-rviz`。
+
+同时修正两个归档问题：
+
+- 速度标签从一位小数改为保留必要小数，避免 `0.75m/s` 被命名成 `v0p8`。
+- 每组测试新增 `logs/*_evaluator.log`。如果 `tracker_evaluate.py` 失败，会在 `evaluation/` 下写入 `evaluation_failed.txt`，避免出现空 evaluation 文件夹却没有错误原因。

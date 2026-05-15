@@ -4,6 +4,7 @@ import yaml
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch.substitutions import Command
@@ -19,6 +20,7 @@ def generate_launch_description():
 
     # Declare launch arguments
     launch_args = [
+        DeclareLaunchArgument('enable_rviz', default_value='true'),
         DeclareLaunchArgument('target_speed', default_value='1.0'),
         DeclareLaunchArgument('min_speed', default_value='0.4'),
         DeclareLaunchArgument('lqr_q_lateral', default_value='3.0'),
@@ -59,6 +61,7 @@ def generate_launch_description():
         executable='rviz2',
         name='rviz',
         arguments=['-d', os.path.join(pkg_share, 'launch', 'gym_bridge.rviz')],
+        condition=IfCondition(LaunchConfiguration('enable_rviz')),
     )
 
     map_server_node = Node(
