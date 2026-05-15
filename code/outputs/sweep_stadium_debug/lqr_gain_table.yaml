@@ -1,0 +1,8 @@
+version: 1
+entries:
+- speed: 0.5
+  q_lateral: 12.000000000000002
+  q_heading: 6.0
+  r_steering: 3.0
+  feedforward_gain: 0.8
+  score: 0.06909687509374787

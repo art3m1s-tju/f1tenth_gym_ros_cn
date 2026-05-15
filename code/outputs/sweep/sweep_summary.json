@@ -1,0 +1,67 @@
+{
+  "sweep_time_s": 296.3865146636963,
+  "speed_points": [
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0
+  ],
+  "grid_sizes": [
+    5,
+    4,
+    5,
+    3
+  ],
+  "entries": [
+    {
+      "speed": 0.5,
+      "q_lateral": 1.0,
+      "q_heading": 6.0,
+      "r_steering": 3.0,
+      "feedforward_gain": 1.0,
+      "score": 0.018723876111510815
+    },
+    {
+      "speed": 1.0,
+      "q_lateral": 1.0,
+      "q_heading": 1.1447142425533319,
+      "r_steering": 16.87023975571047,
+      "feedforward_gain": 0.8,
+      "score": 0.7205436379279202
+    },
+    {
+      "speed": 1.5,
+      "q_lateral": 4.513193713658875,
+      "q_heading": 0.65,
+      "r_steering": 20.999999999999996,
+      "feedforward_gain": 0.8,
+      "score": 0.5850390266316609
+    },
+    {
+      "speed": 2.0,
+      "q_lateral": 12.000000000000002,
+      "q_heading": 0.5,
+      "r_steering": 16.87023975571047,
+      "feedforward_gain": 0.8,
+      "score": 0.4691094089267507
+    },
+    {
+      "speed": 2.5,
+      "q_lateral": 12.0,
+      "q_heading": 0.575,
+      "r_steering": 3.45,
+      "feedforward_gain": 0.8,
+      "score": 0.4125806279341343
+    },
+    {
+      "speed": 3.0,
+      "q_lateral": 12.0,
+      "q_heading": 0.575,
+      "r_steering": 3.45,
+      "feedforward_gain": 0.8,
+      "score": 0.41595123469134565
+    }
+  ]
+}

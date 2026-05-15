@@ -1,205 +1,390 @@
-# F1TENTH Gym ROS 2 仿真环境（中文版）
+# F1TENTH Gym ROS 2 仿真环境
 
-基于 ROS 2 Foxy 和 Docker 的 F1TENTH 开源赛车仿真环境，支持 RViz 可视化、键盘遥控、多车对抗，适合控制算法、路径规划和强化学习的开发与验证。
+基于 ROS 2 Foxy + Docker 的 F1TENTH 赛车仿真，支持 RViz 可视化、键盘遥控、多车对抗。
 
 > 上游仓库：[f1tenth/f1tenth_gym_ros](https://github.com/f1tenth/f1tenth_gym_ros)
-> 本仓库针对国内网络环境做了 apt / pip 换源，优化了 Docker 构建成功率。
+> 本仓库针对国内网络做了 apt/pip 换源优化。
 
 ---
 
-## 系统要求
+## 环境准备
 
 - Linux（推荐 Ubuntu 22.04）
-- Docker（≥ 20.10）
-- [rocker](https://github.com/osrf/rocker)，用于把 X11 和 NVIDIA GPU 透传进容器
-- NVIDIA 显卡 + `nvidia-container-toolkit`（可选，但强烈推荐；无 N 卡可去掉 `--nvidia` 参数走软件渲染）
-
-### 安装 rocker 和 NVIDIA 支持
+- Docker ≥ 20.10
+- [rocker](https://github.com/osrf/rocker)（`sudo apt install python3-rocker` 或 `pip install rocker`）
+- NVIDIA 显卡 + `nvidia-container-toolkit`（可选，无 N 卡去掉 `--nvidia` 参数即可）
 
 ```bash
-# rocker
-sudo apt install python3-rocker
-# 或：pip install rocker
-
-# NVIDIA Container Toolkit（有 N 卡才需要）
-# 参考 https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
-```
-
-安装后确认 docker 能识别 nvidia runtime：
-```bash
-docker info | grep -i runtime
-# 应该看到：Runtimes: nvidia runc ...
-```
-
-把当前用户加进 docker 组可省掉 sudo：
-```bash
-sudo usermod -aG docker $USER
-newgrp docker
+# 把当前用户加进 docker 组（免 sudo）
+sudo usermod -aG docker $USER && newgrp docker
 ```
 
 ---
 
 ## 快速开始
 
-### 1. 克隆仓库
+### 1. 克隆并重命名
 
 ```bash
-cd ~
 git clone https://github.com/art3m1s-tju/f1tenth_gym_ros_cn.git
-cd f1tenth_gym_ros_cn
+mv f1tenth_gym_ros_cn f1tenth_gym_ros
+cd f1tenth_gym_ros
 ```
 
-### 2. 构建 Docker 镜像
+### 2. 构建镜像
 
 ```bash
-docker build --no-cache -t f1tenth_gym_ros -f Dockerfile .
+DOCKER_BUILDKIT=1 docker build -t f1tenth_gym_ros -f Dockerfile .
 ```
 
-构建过程会：
-- 基于 `ros:foxy` 基础镜像
-- 自动把 apt 源换成阿里云、pip 源换成清华（已写进 Dockerfile）
-- 安装 RViz、ackermann_msgs、xacro、nav2 等 ROS 2 依赖
-- 从上游拉 `f1tenth_gym` Python 仿真库并安装
-- `colcon build` 编译 ROS 2 包
+首次构建约 10–20 分钟，镜像约 2.7 GB。
 
-首次构建约 10–20 分钟，取决于网速。完成后镜像约 2.7 GB。
-
-如果遇到 apt hash mismatch，多半是网络缓存层捣乱，重试 `docker build --no-cache ...` 即可；仍不行可参考「常见问题」。
-
-### 3. 启动主仿真（终端 1）
-
-使用 rocker 把 GPU 和 X11 透传进容器，同时把当前目录挂载到容器内 `/sim_ws/src/f1tenth_gym_ros`，方便实时改代码和配置：
+### 3. 启动仿真（终端 1）
 
 ```bash
-cd ~/f1tenth_gym_ros_cn
 rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
 ```
 
-无 NVIDIA 显卡去掉 `--nvidia`：
-```bash
-rocker --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
-```
+无 N 卡：`rocker --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros`
 
-进入容器后执行：
+进入容器后：
+
 ```bash
 source /opt/ros/foxy/setup.bash
 source /sim_ws/install/local_setup.bash
 ros2 launch f1tenth_gym_ros gym_bridge_launch.py
 ```
 
-正常会弹出 RViz 窗口，显示小车、激光扫描和地图。
-
-> **关于重新编译：** 镜像构建时已经 `colcon build` 过一次。如果你只是跑仿真，不需要再编译。只有在改了挂载进来的源码（比如改了 `f1tenth_gym_ros/` 下的 Python 节点）后，才需要：
-> ```bash
-> cd /sim_ws
-> colcon build
-> source install/local_setup.bash
-> ```
-
-### 4. 启动键盘遥控（终端 2）
-
-打开一个新的**本地**终端，进入已经跑起来的容器：
+### 4. 键盘遥控（终端 2）
 
 ```bash
-docker ps                       # 找到正在运行的容器 ID
-docker exec -it <容器ID> /bin/bash
-```
-
-在容器里启动遥控节点：
-```bash
+docker exec -it $(docker ps -q) /bin/bash
 source /opt/ros/foxy/setup.bash
 source /sim_ws/install/local_setup.bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
-**键位：**
-- `i` / `,` 前进 / 倒车
-- `j` / `l` 左转 / 右转
-- `k` 刹车
-- `u` / `o` / `m` / `.` 斜向
-- `q` / `z` 提高 / 降低线速度和角速度
-- `w` / `x` 只调线速度
-- `e` / `c` 只调角速度
-
-**必须让这个终端窗口保持焦点**，否则按键不会被捕获。
+键位：`i`/`,` 前进/倒车，`j`/`l` 左转/右转，`k` 刹车，`q`/`z` 调速。保持该终端焦点才能捕获按键。
 
 ---
 
-## 配置说明
+## 配置
 
-核心配置在 `config/sim.yaml`，挂载后在宿主机直接编辑即可生效（重启 launch 后）。
+编辑 `config/sim.yaml`，重启 launch 生效。
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `map_path` | 地图文件路径（容器内绝对路径，不含扩展名） | `/sim_ws/src/f1tenth_gym_ros/maps/levine` |
-| `map_img_ext` | 地图图片扩展名 | `.png` |
-| `num_agent` | 对手车辆数（0 = 单车，1 = 1v1 对抗） | `1` |
+| `map_path` | 地图路径（容器内绝对路径，不含扩展名） | `/sim_ws/src/f1tenth_gym_ros/maps/levine` |
+| `num_agent` | 对手数（0=单车，1=对抗） | `1` |
 | `sx`, `sy`, `stheta` | 主车初始位姿 | `0, 0, 0` |
-| `sx1`, `sy1`, `stheta1` | 对手车初始位姿 | `2.0, 0.5, 0` |
 | `scan_beams` | LiDAR 波束数 | `1080` |
-| `scan_fov` | LiDAR 视场角（弧度） | `4.7` |
-| `kb_teleop` | 启用键盘遥控话题 | `True` |
+| `kb_teleop` | 启用键盘遥控 | `True` |
 
-### 切换地图
-仓库自带 `maps/levine` 和 `maps/Spielberg_map`。换地图只需改 `map_path`：
-```yaml
-map_path: '/sim_ws/src/f1tenth_gym_ros/maps/Spielberg_map'
-```
-
-### 自定义地图
-放一对同名的 `.png` 和 `.yaml` 到 `maps/` 目录即可，YAML 格式跟 ROS `map_server` 一致。
+切换地图只需改 `map_path`，自带 `maps/levine` 和 `maps/Spielberg_map`。自定义地图放同名 `.png` + `.yaml` 到 `maps/` 即可。
 
 ---
 
-## 话题列表
+## 运行自定义规划控制算法
 
-主车（`ego_racecar` 命名空间）：
-- 订阅 `/drive` (`ackermann_msgs/AckermannDriveStamped`) 控制指令
-- 订阅 `/initialpose` (`geometry_msgs/PoseWithCovarianceStamped`) RViz 2D Pose Estimate 重置位姿
-- 发布 `/ego_racecar/scan` (`sensor_msgs/LaserScan`) LiDAR
-- 发布 `/ego_racecar/odom` (`nav_msgs/Odometry`) 里程计
-- 发布 `/map` (`nav_msgs/OccupancyGrid`) 占据栅格地图
-- 发布 `/tf` 坐标变换
+仓库内置了基于 LQR 的路径跟踪控制器和 control_friendly 轨迹规划器（位于 `code/` 目录），可以在仿真中测试闭环控制。
 
-多车模式（`num_agent: 1`）下对手车用 `opp_racecar` 前缀对应话题。
+### 1. 生成赛道边界数据（首次运行）
+
+进入容器后执行：
+
+```bash
+python3 /sim_ws/src/f1tenth_gym_ros/code/generate_track.py
+```
+
+脚本会从 `maps/my_map.pgm` 提取赛道内外边界，输出 `code/outputs/csv/processed_track.csv`。运行结束后会打印建议的初始位姿，将 `sx`/`sy`/`stheta` 更新到 `config/sim.yaml`。
+
+### 2. 启动仿真 + 规划 + LQR 控制
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /sim_ws/install/local_setup.bash
+ros2 launch f1tenth_gym_ros pnc_sim_launch.py
+```
+
+该 launch 会同时启动仿真器、轨迹规划器和 LQR 控制器。小车会自动沿规划轨迹行驶。
+
+### 控制器参数调整
+
+在 `launch/pnc_sim_launch.py` 中直接修改 LQR 参数：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `target_speed` | 目标速度 (m/s) | `1.0` |
+| `lqr_q_lateral` | 横向误差权重（越大跟踪越紧） | `3.0` |
+| `lqr_q_heading` | 航向误差权重 | `1.2` |
+| `lqr_r_steering` | 转向代价（越大转向越平滑） | `8.0` |
+| `max_lateral_accel` | 最大横向加速度限制 (m/s^2) | `4.0` |
+
+详细调参指南见 [parameters.md](parameters.md)。
+
+### 一键运行 + 评估
+
+使用 `run_pnc_sim.sh` 可以一键启动仿真并在 Ctrl+C 停止后自动评估：
+
+```bash
+./run_pnc_sim.sh
+```
+
+脚本顶部可直接修改 LQR 参数和规划参数。仿真结束后自动调用评估脚本，结果保存到带参数命名的文件夹。
+
+### 误差评估
+
+跑完一轮控制后，在容器内执行：
+
+```bash
+python3 /sim_ws/src/f1tenth_gym_ros/code/tracker_evaluate.py \
+  --log /sim_ws/src/f1tenth_gym_ros/code/outputs/logs/lqr_tracking_log.csv \
+  --reference-trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation
+```
+
+输出指标包括：
+- 横向误差：mean / P95 / max（单位 m）
+- 航向误差：mean / P95 / max（单位 deg）
+- 可视化图表保存在 `code/outputs/evaluation/`
+
+### 评估文件夹命名规则
+
+评估输出目录按 **关键参数 + 时间戳** 自动命名，格式为：
+
+```
+v{速度}_Ql{横向权重}_Qh{航向权重}_R{转向代价}_ff{前馈增益}_{YYYYMMDD_HHMMSS}
+```
+
+示例：
+
+```
+code/outputs/evaluation/v1.0_Ql3.0_Qh1.2_R8.0_ff1.0_20260515_143022/
+```
+
+这样可以直观对比不同参数组合的评估结果，无需手动重命名。
+
+### 参数扫描（Parameter Sweep）
+
+仓库提供了离线参数扫描工具 `code/lqr_sweep/`，可自动搜索不同速度下的最优 LQR 参数组合。
+
+#### 3.0m/s 可行标准赛道
+
+仓库提供了一个低曲率 stadium 测试赛道，用于标定 LQR 的 `Q/R/ff` 速度查找表：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros
+python3 code/lqr_sweep/generate_feasible_track.py \
+  --open-map \
+  --map-prefix maps/stadium_3ms_open \
+  --trajectory-csv code/outputs/generated_tracks/stadium_3ms_trajectory.csv \
+  --track-csv code/outputs/generated_tracks/stadium_3ms_processed_track.csv
+```
+
+输出：
+
+```text
+maps/stadium_3ms_open.pgm
+maps/stadium_3ms_open.yaml
+code/outputs/generated_tracks/stadium_3ms_trajectory.csv
+code/outputs/generated_tracks/stadium_3ms_processed_track.csv
+code/outputs/generated_tracks/stadium_3ms_open_preview.png
+```
+
+该赛道最大曲率约 `0.25 1/m`，3.0m/s 时横向加速度约 `2.25 m/s^2`，适合做低/中/高速 LQR 参数表标定。推荐起始位姿：
+
+```text
+sx=0.0, sy=4.0, stheta=3.1416
+```
+
+使用该标准赛道做 lookup table 扫描：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.run_sweep --mode full \
+  --map-path /sim_ws/src/f1tenth_gym_ros/maps/stadium_3ms_open \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/stadium_3ms_trajectory.csv \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --coarse-grid 5,4,5,3 \
+  --laps 3 \
+  --max-sim-time 420 \
+  --disable-curvature-speed-limit \
+  --disable-speed-ramp \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium
+```
+
+标准赛道使用开放空白地图，只用于标定 LQR 表；虚拟左右边界只参与可视化和误差理解，不参与碰撞。扫表时必须关闭曲率限速和速度斜坡，保证全程定速。得到 LQR 表后，再回到原赛道开启曲率限速/预瞄限速做完整系统验证。
+
+低速多圈会显著增加仿真时间。stadium 赛道一圈约 41m，0.5m/s 跑 3 圈理论上需要约 247s，因此标准赛道示例显式设置 `--max-sim-time 420`。不传该参数时脚本会根据轨迹长度、圈数和最低测试速度自动估算。
+
+#### 推荐测试流程
+
+先用高速点做一个较小规模的 smoke test，确认 5 圈稳定性和约束筛选正常：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.run_sweep --mode coarse-only \
+  --speeds 2.5 3.0 \
+  --coarse-grid 4,3,4,3 \
+  --laps 5 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --max-workers 4 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_smoke
+```
+
+如果 smoke test 结果合理，再运行完整扫描生成正式增益表。
+
+#### 完整扫描
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.run_sweep --mode full \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --coarse-grid 5,4,5,3 \
+  --laps 5 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep
+```
+
+流程：对每个速度点先做粗网格搜索（5×4×5×3 = 300 组合），再对 top-3 做局部细化（每个 3^4 = 81 组合）。每组参数默认连续跑 5 圈，最终输出增益查找表。
+
+离线 sweep 默认启用与 ROS 控制器一致的纵向速度斜坡：`--max-accel 1.0`、`--max-decel 2.0`。若要临时关闭，可加 `--disable-speed-ramp`。
+
+#### 仅粗网格（快速预览）
+
+```bash
+python3 -m lqr_sweep.run_sweep --mode coarse-only \
+  --speeds 1.0 2.0 \
+  --coarse-grid 4,3,4,2 \
+  --laps 5 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep
+```
+
+#### 单组参数验证
+
+```bash
+python3 -m lqr_sweep.run_sweep --mode single \
+  --speed 1.5 \
+  --laps 5 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --q-lateral 5.0 --q-heading 2.0 --r-steering 10.0 --feedforward-gain 0.9
+```
+
+#### 验证已有增益表
+
+```bash
+python3 -m lqr_sweep.run_sweep --mode validate \
+  --laps 5 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep/lqr_gain_table.yaml
+```
+
+#### 完整 ROS 多圈验证
+
+离线 `--mode validate` 只使用 Python gym harness。若要启动完整 ROS 链路（仿真器 + 规划器 + LQR 控制器）验证新表，执行：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep/lqr_gain_table.yaml \
+  --speed 3.0 \
+  --laps 5 \
+  --timeout 180 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/lqr_table_v3p0_5laps
+```
+
+#### 扫描时间估算
+
+| 模式 | 速度点数 | 网格规模 | 预计耗时 |
+|------|---------|---------|---------|
+| `full`（默认 5,4,5,3，5 圈） | 6 | 300 + 243/速度点 | 1–3 h |
+| `coarse-only`（4,3,4,2，5 圈） | 2 | 96/速度点 | 10–30 min |
+| `single` | 1 | 1 | 30–90 s |
+| `validate` | 按表 | 按表条目数 | 5–10 min |
+
+实际耗时取决于赛道长度和 CPU 核数（`--max-workers` 控制并行度）。
+
+#### 扫描输出
+
+```
+code/outputs/sweep/
+├── lqr_gain_table.yaml    # 速度-增益查找表（可直接用于控制器）
+└── sweep_summary.json     # 扫描元数据（耗时、网格配置、各速度点最优参数）
+```
+
+### RViz 可视化
+
+启动后在 RViz 中 Add Display：
+- `/global_trajectory`（Path）— 参考轨迹（绿色）
+- `/tracked_path_lqr`（Path）— 实际行驶轨迹（红色）
+- `/ego_racecar/odom`（Odometry）— 实时位姿
+
+### 文件结构
+
+```
+code/
+├── generate_track.py     # 离线赛道边界提取
+├── run_planner.py        # 规划器入口
+├── run_lqr.py            # LQR 控制器入口
+├── planner.py            # control_friendly 轨迹规划
+├── pnc_rc/lqr/
+│   ├── controller.py     # LQR 路径跟踪控制器
+│   └── math.py           # LQR 数学计算
+└── outputs/              # 运行时输出（轨迹CSV、日志）
+```
+
+### 话题映射
+
+| 话题 | 类型 | 说明 |
+|------|------|------|
+| `/global_trajectory` | `nav_msgs/Path` | 规划器发布的全局轨迹 |
+| `/ego_racecar/odom` | `Odometry` | 仿真器发布，LQR 订阅 |
+| `/drive` | `AckermannDriveStamped` | LQR 发布，仿真器订阅 |
+
+---
+
+## 话题（仿真器原生）
+
+| 话题 | 类型 | 方向 |
+|------|------|------|
+| `/drive` | `AckermannDriveStamped` | 订阅（控制） |
+| `/ego_racecar/scan` | `LaserScan` | 发布（LiDAR） |
+| `/ego_racecar/odom` | `Odometry` | 发布（里程计） |
+| `/map` | `OccupancyGrid` | 发布 |
+
+多车模式下对手用 `opp_racecar` 前缀。
 
 ---
 
 ## 常见问题
 
-**Q: `docker build` 报 apt Hash Sum mismatch？**
-A: 国内网络到 Ubuntu 官方源的 CDN 层经常返回不同步的缓存文件。本仓库 Dockerfile 已经换到阿里云 + 禁用 HTTP 缓存。如果仍然失败，可换成清华源：
-```
-sed -i 's@mirrors.aliyun.com@mirrors.tuna.tsinghua.edu.cn@g' Dockerfile
-```
-并加 `--no-cache` 重构建。
-
-**Q: `pip install gym==0.19.0` 报 "invalid metadata" 或 "Expected end or semicolon"？**
-A: `gym==0.19.0` 的 `setup.py` 有非法版本写法（`opencv-python>=3.`），pip ≥ 24.1 拒绝解析。本仓库 Dockerfile 已经把 pip 锁到 `<24.1`。
-
-**Q: 启动时提示 `No map received`？**
-A: 检查 `config/sim.yaml` 里 `map_path`，必须是**容器内**的绝对路径（通常是 `/sim_ws/src/f1tenth_gym_ros/maps/xxx`，不要带 `.png`）。
-
-**Q: RViz 白屏 / 报 OpenGL 错误？**
-A:
-- 先确认 `rocker` 带了 `--nvidia --x11`
-- 确认宿主机 `nvidia-smi` 正常
-- 对于 RTX 40/50 系等新卡，若 Mesa 软件渲染报错，必须走 `--nvidia`
-
-**Q: 键盘按键没反应？**
-A: 让跑 `teleop_twist_keyboard` 的那个终端窗口保持鼠标焦点，ROS 是从 stdin 读键盘的。
-
-**Q: 要怎么重新 `colcon build`？**
-A: 只有改了挂载进来的 ROS 源码才需要。在容器内：
-```bash
-cd /sim_ws && colcon build && source install/local_setup.bash
-```
+| 问题 | 解决 |
+|------|------|
+| apt Hash Sum mismatch | 已换阿里云源，若仍失败可换清华源：`sed -i 's@mirrors.aliyun.com@mirrors.tuna.tsinghua.edu.cn@g' Dockerfile` |
+| pip 报 invalid metadata | 已锁定 pip < 24.1，正常构建即可 |
+| No map received | 检查 `sim.yaml` 的 `map_path` 是容器内绝对路径，不带 `.png` |
+| RViz 白屏/OpenGL 错误 | 确认 `rocker` 带了 `--nvidia --x11`，宿主机 `nvidia-smi` 正常 |
+| 键盘没反应 | 保持 teleop 终端窗口焦点 |
+| generate_track.py 报错 | 确认地图中有清晰的环形赛道结构（内外墙闭合） |
+| LQR 控制器无输出 | 确认 `generate_track.py` 已运行且 `code/outputs/csv/processed_track.csv` 存在 |
+| 改了源码要重编译 | 容器内：`cd /sim_ws && colcon build && source install/local_setup.bash` |
 
 ---
 
 ## 许可证
 
-MIT License，沿用上游仓库。引用请见：
+MIT License。引用：
 
 ```bibtex
 @inproceedings{okelly2020f1tenth,

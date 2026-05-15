@@ -1,0 +1,74 @@
+{
+  "sweep_time_s": 1542.6245477199554,
+  "speed_points": [
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0
+  ],
+  "grid_sizes": [
+    5,
+    4,
+    5,
+    3
+  ],
+  "lap_count": 3,
+  "max_sim_time": 420.0,
+  "max_lateral_accel": 4.0,
+  "enable_curvature_speed_limit": false,
+  "enable_speed_ramp": false,
+  "max_accel": 1.0,
+  "max_decel": 2.0,
+  "entries": [
+    {
+      "speed": 0.5,
+      "q_lateral": 8.381645468223628,
+      "q_heading": 6.0,
+      "r_steering": 3.9000000000000004,
+      "feedforward_gain": 1.0,
+      "score": 0.01483326476293564
+    },
+    {
+      "speed": 1.0,
+      "q_lateral": 10.2,
+      "q_heading": 0.575,
+      "r_steering": 30.0,
+      "feedforward_gain": 0.8,
+      "score": 0.2663564079930741
+    },
+    {
+      "speed": 1.5,
+      "q_lateral": 1.0,
+      "q_heading": 0.5,
+      "r_steering": 3.0,
+      "feedforward_gain": 0.8,
+      "score": 0.2106141389998172
+    },
+    {
+      "speed": 2.0,
+      "q_lateral": 12.0,
+      "q_heading": 1.4881285153193315,
+      "r_steering": 9.486832980505136,
+      "feedforward_gain": 0.8,
+      "score": 0.16928174588847672
+    },
+    {
+      "speed": 2.5,
+      "q_lateral": 4.503332099679081,
+      "q_heading": 5.1,
+      "r_steering": 3.0,
+      "feedforward_gain": 0.8,
+      "score": 0.11812933849715365
+    },
+    {
+      "speed": 3.0,
+      "q_lateral": 8.381645468223628,
+      "q_heading": 5.1,
+      "r_steering": 3.0,
+      "feedforward_gain": 1.0,
+      "score": 0.07903412062245899
+    }
+  ]
+}

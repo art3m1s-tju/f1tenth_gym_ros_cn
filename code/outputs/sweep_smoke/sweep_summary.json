@@ -1,0 +1,32 @@
+{
+  "sweep_time_s": 61.830559492111206,
+  "speed_points": [
+    2.5,
+    3.0
+  ],
+  "grid_sizes": [
+    4,
+    3,
+    4,
+    3
+  ],
+  "lap_count": 5,
+  "entries": [
+    {
+      "speed": 2.5,
+      "q_lateral": 1.0,
+      "q_heading": 0.5,
+      "r_steering": 3.0,
+      "feedforward_gain": 1.2,
+      "score": Infinity
+    },
+    {
+      "speed": 3.0,
+      "q_lateral": 1.0,
+      "q_heading": 0.5,
+      "r_steering": 3.0,
+      "feedforward_gain": 1.2,
+      "score": Infinity
+    }
+  ]
+}
