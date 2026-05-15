@@ -354,26 +354,66 @@ python3 -m lqr_sweep.validate_ros \
   --max-lateral-accel 4.0 \
   --max-accel 1.0 \
   --max-decel 2.0 \
+  --noise-profile clean \
   --disable-rviz \
   --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
-  --batch-name original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_300s
+  --batch-name original_map_table_curvlimit_ramp_0p5_to_3p0_300s
 ```
+
+如果要做更接近实车的鲁棒性验证，保持同一套参数和赛道，额外跑一组轻量噪声/延迟：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --timeout 300 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --noise-profile light \
+  --noise-seed 42 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name original_map_table_curvlimit_ramp_0p5_to_3p0_300s
+```
+
+`--noise-profile clean` 不注入噪声；`--noise-profile light` 会给控制器看到的位姿加入 `2cm`
+位置噪声、`1deg` 航向噪声和 `60ms` 位姿延迟。评估仍使用真实 odom 日志，所以比较的是
+“带噪声控制之后实际轨迹变差多少”。也可以用 `--position-noise-std`、
+`--heading-noise-std-deg`、`--pose-delay-ms` 单独覆盖默认值。
 
 输出目录结构示例：
 
 ```text
-code/outputs/evaluation_ros/original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_300s/
-├── manifest.csv
-├── v0p5_table_stadium_curv1_ramp1_alat4p0_YYYYmmdd_HHMMSS/
-│   ├── logs/
-│   │   ├── ..._launch.log
-│   │   ├── ..._evaluator.log
-│   │   └── ..._tracking.csv
-│   └── evaluation/
-│       ├── lookahead_summary.csv
-│       ├── lookahead_summary.json
-│       └── *_lateral_error.png / *_heading_error.png / *_path_overlay.png
-└── v1p0_.../
+code/outputs/evaluation_ros/original_map_table_curvlimit_ramp_0p5_to_3p0_300s/
+├── clean/
+│   ├── manifest.csv
+│   └── v0p5_table_stadium_curv1_ramp1_alat4p0_clean_YYYYmmdd_HHMMSS/
+│       ├── logs/
+│       │   ├── ..._launch.log
+│       │   ├── ..._evaluator.log
+│       │   └── ..._tracking.csv
+│       └── evaluation/
+│           ├── lookahead_summary.csv
+│           ├── lookahead_summary.json
+│           └── *_lateral_error.png / *_heading_error.png / *_path_overlay.png
+└── noisy_light_pos2cm_yaw1deg_delay60ms/
+    ├── manifest.csv
+    └── v0p5_table_stadium_curv1_ramp1_alat4p0_noisy_light_pos2cm_yaw1deg_delay60ms_YYYYmmdd_HHMMSS/
+        ├── logs/
+        │   ├── ..._launch.log
+        │   ├── ..._evaluator.log
+        │   └── ..._tracking.csv
+        └── evaluation/
+            ├── lookahead_summary.csv
+            ├── lookahead_summary.json
+            └── *_lateral_error.png / *_heading_error.png / *_path_overlay.png
 ```
 
 这里 `--laps 99` 的作用是不要因为完成几圈就提前停止，而是尽量跑满 `--timeout 300`
@@ -382,7 +422,7 @@ code/outputs/evaluation_ros/original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_30
 如果临时把 `--timeout` 改成 `150`，建议把 `--batch-name` 也同步改成：
 
 ```text
-original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_150s
+original_map_table_curvlimit_ramp_0p5_to_3p0_150s
 ```
 
 这样后续看结果目录时不会把 150 秒测试误认为 300 秒测试。

@@ -71,6 +71,10 @@ def run_ros_validation(
     enable_speed_ramp: bool = True,
     max_accel: float = 1.0,
     max_decel: float = 2.0,
+    position_noise_std: float = 0.0,
+    heading_noise_std_deg: float = 0.0,
+    pose_delay_ms: float = 0.0,
+    noise_seed: int = 42,
     launch_log_path: Path | None = None,
     evaluator_log_path: Path | None = None,
     enable_rviz: bool = True,
@@ -126,6 +130,10 @@ def run_ros_validation(
         f"enable_speed_ramp:={str(enable_speed_ramp).lower()}",
         f"max_accel:={max_accel}",
         f"max_decel:={max_decel}",
+        f"validation_position_noise_std:={position_noise_std}",
+        f"validation_heading_noise_std_deg:={heading_noise_std_deg}",
+        f"validation_pose_delay_ms:={pose_delay_ms}",
+        f"validation_noise_seed:={noise_seed}",
         f"track_csv:={track_csv}",
         f"trajectory_csv:={trajectory_csv}",
         f"log_path:={log_path}",
@@ -141,6 +149,12 @@ def run_ros_validation(
         f"curvature_limit={enable_curvature_speed_limit}, "
         f"speed_ramp={enable_speed_ramp}, "
         f"min_speed={min_speed}, max_lat_accel={max_lateral_accel}"
+    )
+    print(
+        "  Validation noise: "
+        f"pos={position_noise_std:.3f}m, "
+        f"heading={heading_noise_std_deg:.2f}deg, "
+        f"delay={pose_delay_ms:.0f}ms, seed={noise_seed}"
     )
 
     launch_log_file = None
@@ -224,7 +238,11 @@ def run_ros_validation(
 
 
 def _speed_label(speed: float) -> str:
-    text = f"{speed:.2f}".rstrip("0").rstrip(".")
+    return _number_label(speed)
+
+
+def _number_label(value: float, digits: int = 2) -> str:
+    text = f"{value:.{digits}f}".rstrip("0").rstrip(".")
     return text.replace(".", "p")
 
 
@@ -233,17 +251,62 @@ def _default_batch_name() -> str:
     return f"original_map_rviz_table_curvlimit_ramp_{stamp}"
 
 
+def _noise_profile_values(
+    profile: str,
+    position_noise_std: float | None,
+    heading_noise_std_deg: float | None,
+    pose_delay_ms: float | None,
+) -> tuple[float, float, float]:
+    defaults = {
+        "clean": (0.0, 0.0, 0.0),
+        "light": (0.02, 1.0, 60.0),
+    }
+    pos, heading, delay = defaults[profile]
+    if position_noise_std is not None:
+        pos = position_noise_std
+    if heading_noise_std_deg is not None:
+        heading = heading_noise_std_deg
+    if pose_delay_ms is not None:
+        delay = pose_delay_ms
+    return max(0.0, pos), max(0.0, heading), max(0.0, delay)
+
+
+def _noise_folder_name(
+    profile: str,
+    position_noise_std: float,
+    heading_noise_std_deg: float,
+    pose_delay_ms: float,
+) -> str:
+    is_clean = (
+        profile == "clean"
+        and position_noise_std == 0.0
+        and heading_noise_std_deg == 0.0
+        and pose_delay_ms == 0.0
+    )
+    if is_clean:
+        return "clean"
+    pos_cm = position_noise_std * 100.0
+    return (
+        f"noisy_{profile}_"
+        f"pos{_number_label(pos_cm)}cm_"
+        f"yaw{_number_label(heading_noise_std_deg)}deg_"
+        f"delay{int(round(pose_delay_ms))}ms"
+    )
+
+
 def _run_label(
     speed: float,
     enable_curvature_speed_limit: bool,
     enable_speed_ramp: bool,
     max_lateral_accel: float,
+    noise_folder: str,
 ) -> str:
     return (
         f"v{_speed_label(speed)}_table_stadium_"
         f"curv{int(enable_curvature_speed_limit)}_"
         f"ramp{int(enable_speed_ramp)}_"
         f"alat{str(max_lateral_accel).replace('.', 'p')}_"
+        f"{noise_folder}_"
         f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
 
@@ -265,8 +328,20 @@ def run_batch_ros_validation(
     max_accel: float,
     max_decel: float,
     enable_rviz: bool,
+    noise_profile: str,
+    position_noise_std: float,
+    heading_noise_std_deg: float,
+    pose_delay_ms: float,
+    noise_seed: int,
 ) -> None:
     """Run ROS/RViz validation for multiple speeds and archive each run."""
+    noise_folder = _noise_folder_name(
+        noise_profile,
+        position_noise_std,
+        heading_noise_std_deg,
+        pose_delay_ms,
+    )
+    batch_root = batch_root / noise_folder
     batch_root.mkdir(parents=True, exist_ok=True)
     print(f"Batch output root: {batch_root}")
 
@@ -288,6 +363,11 @@ def run_batch_ros_validation(
                 "max_lateral_accel",
                 "max_accel",
                 "max_decel",
+                "noise_profile",
+                "position_noise_std",
+                "heading_noise_std_deg",
+                "pose_delay_ms",
+                "noise_seed",
             ]
         )
 
@@ -297,6 +377,7 @@ def run_batch_ros_validation(
                 enable_curvature_speed_limit,
                 enable_speed_ramp,
                 max_lateral_accel,
+                noise_folder,
             )
             run_dir = batch_root / label
             logs_dir = run_dir / "logs"
@@ -328,6 +409,10 @@ def run_batch_ros_validation(
                 enable_speed_ramp=enable_speed_ramp,
                 max_accel=max_accel,
                 max_decel=max_decel,
+                position_noise_std=position_noise_std,
+                heading_noise_std_deg=heading_noise_std_deg,
+                pose_delay_ms=pose_delay_ms,
+                noise_seed=noise_seed,
                 launch_log_path=launch_log,
                 evaluator_log_path=evaluator_log,
                 enable_rviz=enable_rviz,
@@ -347,6 +432,11 @@ def run_batch_ros_validation(
                     f"{max_lateral_accel:.3f}",
                     f"{max_accel:.3f}",
                     f"{max_decel:.3f}",
+                    noise_profile,
+                    f"{position_noise_std:.4f}",
+                    f"{heading_noise_std_deg:.4f}",
+                    f"{pose_delay_ms:.1f}",
+                    noise_seed,
                 ]
             )
             f.flush()
@@ -392,6 +482,34 @@ if __name__ == "__main__":
     p.add_argument("--max-steering-angle", type=float, default=0.36)
     p.add_argument("--use-tf-pose", action="store_true")
     p.add_argument(
+        "--noise-profile",
+        choices=["clean", "light"],
+        default="clean",
+        help=(
+            "Validation noise preset. clean disables injected pose noise; "
+            "light uses 2cm position noise, 1deg heading noise, and 60ms delay."
+        ),
+    )
+    p.add_argument(
+        "--position-noise-std",
+        type=float,
+        default=None,
+        help="Override validation position noise standard deviation in meters.",
+    )
+    p.add_argument(
+        "--heading-noise-std-deg",
+        type=float,
+        default=None,
+        help="Override validation heading noise standard deviation in degrees.",
+    )
+    p.add_argument(
+        "--pose-delay-ms",
+        type=float,
+        default=None,
+        help="Override validation pose delay in milliseconds.",
+    )
+    p.add_argument("--noise-seed", type=int, default=42)
+    p.add_argument(
         "--disable-curvature-speed-limit",
         action="store_true",
         help="Disable curvature-based speed limiting during ROS validation.",
@@ -409,6 +527,13 @@ if __name__ == "__main__":
     p.add_argument("--max-accel", type=float, default=1.0)
     p.add_argument("--max-decel", type=float, default=2.0)
     args = p.parse_args()
+
+    position_noise_std, heading_noise_std_deg, pose_delay_ms = _noise_profile_values(
+        args.noise_profile,
+        args.position_noise_std,
+        args.heading_noise_std_deg,
+        args.pose_delay_ms,
+    )
 
     if args.mode == "batch":
         output_root = Path(args.output_dir) if args.output_dir else Path(
@@ -432,6 +557,11 @@ if __name__ == "__main__":
             max_accel=args.max_accel,
             max_decel=args.max_decel,
             enable_rviz=not args.disable_rviz,
+            noise_profile=args.noise_profile,
+            position_noise_std=position_noise_std,
+            heading_noise_std_deg=heading_noise_std_deg,
+            pose_delay_ms=pose_delay_ms,
+            noise_seed=args.noise_seed,
         )
     else:
         out = Path(args.output_dir) if args.output_dir else None
@@ -452,5 +582,9 @@ if __name__ == "__main__":
             enable_speed_ramp=not args.disable_speed_ramp,
             max_accel=args.max_accel,
             max_decel=args.max_decel,
+            position_noise_std=position_noise_std,
+            heading_noise_std_deg=heading_noise_std_deg,
+            pose_delay_ms=pose_delay_ms,
+            noise_seed=args.noise_seed,
             enable_rviz=not args.disable_rviz,
         )

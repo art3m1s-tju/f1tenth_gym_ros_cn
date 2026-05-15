@@ -35,6 +35,10 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_speed_ramp', default_value='true'),
         DeclareLaunchArgument('max_accel', default_value='1.0'),
         DeclareLaunchArgument('max_decel', default_value='2.0'),
+        DeclareLaunchArgument('validation_position_noise_std', default_value='0.0'),
+        DeclareLaunchArgument('validation_heading_noise_std_deg', default_value='0.0'),
+        DeclareLaunchArgument('validation_pose_delay_ms', default_value='0.0'),
+        DeclareLaunchArgument('validation_noise_seed', default_value='42'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
         DeclareLaunchArgument('control_friendly_alpha', default_value='0.56'),
         DeclareLaunchArgument('control_friendly_auto_alpha', default_value='true'),
@@ -121,6 +125,10 @@ def generate_launch_description():
         speed_ramp = LaunchConfiguration('enable_speed_ramp').perform(context)
         accel = LaunchConfiguration('max_accel').perform(context)
         decel = LaunchConfiguration('max_decel').perform(context)
+        position_noise = LaunchConfiguration('validation_position_noise_std').perform(context)
+        heading_noise = LaunchConfiguration('validation_heading_noise_std_deg').perform(context)
+        pose_delay = LaunchConfiguration('validation_pose_delay_ms').perform(context)
+        noise_seed = LaunchConfiguration('validation_noise_seed').perform(context)
         traj_mode = LaunchConfiguration('trajectory_mode').perform(context)
         cf_alpha = LaunchConfiguration('control_friendly_alpha').perform(context)
         cf_auto = LaunchConfiguration('control_friendly_auto_alpha').perform(context)
@@ -172,6 +180,10 @@ def generate_launch_description():
             '-p', f'enable_speed_ramp:={speed_ramp}',
             '-p', f'max_accel:={accel}',
             '-p', f'max_decel:={decel}',
+            '-p', f'validation_position_noise_std:={position_noise}',
+            '-p', f'validation_heading_noise_std_deg:={heading_noise}',
+            '-p', f'validation_pose_delay_ms:={pose_delay}',
+            '-p', f'validation_noise_seed:={noise_seed}',
             '-p', f'lqr_q_lateral:={q_lat}',
             '-p', f'lqr_q_heading:={q_head}',
             '-p', f'lqr_r_steering:={r_steer}',

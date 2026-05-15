@@ -1040,3 +1040,37 @@ enable_rviz:=false
 
 - 速度标签从一位小数改为保留必要小数，避免 `0.75m/s` 被命名成 `v0p8`。
 - 每组测试新增 `logs/*_evaluator.log`。如果 `tracker_evaluate.py` 失败，会在 `evaluation/` 下写入 `evaluation_failed.txt`，避免出现空 evaluation 文件夹却没有错误原因。
+
+### 阶段一噪声/延迟验证选项
+
+为避免只在理想 odom 下验证参数，阶段一 ROS 验证新增可选的位姿噪声和延迟注入。默认仍然是干净测试，不影响已有命令：
+
+```
+--noise-profile clean
+```
+
+新增轻量鲁棒性测试 preset：
+
+```
+--noise-profile light
+```
+
+该 preset 会让 LQR 控制器“看到”的位姿带有 `2cm` 位置高斯噪声、`1deg` 航向高斯噪声和 `60ms` 位姿延迟。控制使用带噪声/延迟的位姿，但 tracking CSV 仍记录真实 odom 相对参考轨迹的误差，因此评估图和 summary 反映的是噪声控制后真实车辆轨迹是否变差。
+
+如需单独调节强度，可覆盖：
+
+```
+--position-noise-std 0.02
+--heading-noise-std-deg 1.0
+--pose-delay-ms 60
+--noise-seed 42
+```
+
+归档结构同步调整为按噪声条件分文件夹，避免 clean 和 noisy 结果混在一起：
+
+```
+evaluation_ros/<batch_name>/clean/
+evaluation_ros/<batch_name>/noisy_light_pos2cm_yaw1deg_delay60ms/
+```
+
+推荐先跑 `clean` 作为基线，再跑 `light` 看 `mean_abs_e_y`、`p95_abs_e_y`、`max_abs_e_y`、`mean_abs_e_psi`、`steering_rate_rms` 是否明显恶化。若 clean 通过但 light 下误差或转向变化率明显放大，说明当前表对感知/定位扰动比较敏感，后续再考虑增大 `R`、降低高速度段激进程度或调速度规划。
