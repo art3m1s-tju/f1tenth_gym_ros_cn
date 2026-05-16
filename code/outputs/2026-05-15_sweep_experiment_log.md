@@ -1095,8 +1095,8 @@ evaluation_ros/<batch_name>/noisy_light_pos2cm_yaw1deg_delay60ms/
 
 - 在目标函数中加入 `p95_abs_e_y` 和 `p95_abs_e_psi_deg`；
 - 提高 `mean/p95` 航向误差的排序权重；
-- 默认将 `q_heading` 搜索范围改为 `1.0~6.0`；
-- 默认将 `R` 搜索范围收窄为 `3.0~25.0`，避免候选长期顶到 `R=30`。
+- 默认将 `q_heading` 搜索范围改为 `2.0~12.0`；
+- 默认将 `R` 搜索范围收窄为 `3.0~15.0`，避免候选长期顶到高 `R`。
 
 推荐下一轮低速航向优化命令：
 
@@ -1114,3 +1114,11 @@ python3 -m lqr_sweep.run_sweep --mode full \
   --objective-profile low-speed-heading \
   --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium_low_speed_heading
 ```
+
+2026-05-17 复扫过程中发现该 profile 仍然会在 `0.6~0.9m/s` 选到 `q_heading` 下界和 `R` 上界，例如 `q_heading=1.0`、`R=25.0`。因此进一步加强该 profile：
+
+- 权重从 `lateral_mean=0.30, heading_mean=0.35, lateral_p95=0.10, heading_p95=0.25` 调整为 `0.15, 0.45, 0.05, 0.35`；
+- 默认 `q_heading_range` 从 `1.0~6.0` 改为 `2.0~12.0`；
+- 默认 `r_steering_range` 从 `3.0~25.0` 改为 `3.0~15.0`。
+
+若复扫后仍然撞 `q_heading` 下界或 `R` 上界，说明单纯调权重还不够，下一步应直接加硬约束或固定一组低速候选范围，例如 `q_heading=3~12`、`R=3~10`。

@@ -107,8 +107,8 @@ def _sweep_range_overrides(args: argparse.Namespace) -> dict[str, tuple[float, f
         "ff_gain_range": _parse_float_range(args.ff_gain_range, "--ff-gain-range"),
     }
     if args.objective_profile == "low-speed-heading":
-        overrides["q_heading_range"] = overrides["q_heading_range"] or (1.0, 6.0)
-        overrides["r_steering_range"] = overrides["r_steering_range"] or (3.0, 25.0)
+        overrides["q_heading_range"] = overrides["q_heading_range"] or (2.0, 12.0)
+        overrides["r_steering_range"] = overrides["r_steering_range"] or (3.0, 15.0)
     return {key: value for key, value in overrides.items() if value is not None}
 
 

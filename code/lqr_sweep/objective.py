@@ -37,10 +37,10 @@ class ObjectiveConfig:
 DEFAULT_OBJECTIVE = ObjectiveConfig()
 
 LOW_SPEED_HEADING_OBJECTIVE = ObjectiveConfig(
-    lateral_mean_weight=0.30,
-    heading_mean_weight=0.35,
-    lateral_p95_weight=0.10,
-    heading_p95_weight=0.25,
+    lateral_mean_weight=0.15,
+    heading_mean_weight=0.45,
+    lateral_p95_weight=0.05,
+    heading_p95_weight=0.35,
 )
 
 

@@ -454,7 +454,7 @@ code/outputs/sweep/
 
 如果原地图验证出现低速横向误差能通过、但航向误差偏大的情况，可以使用低速航向优化
 profile。该 profile 会提高 `mean/p95(e_psi)` 在目标函数中的权重，并默认使用
-`q_heading=1.0~6.0`、`R=3.0~25.0`，避免低速段总选到过低航向权重和过保守转向。
+`q_heading=2.0~12.0`、`R=3.0~15.0`，避免低速段总选到过低航向权重和过保守转向。
 
 ```bash
 cd /sim_ws/src/f1tenth_gym_ros/code
@@ -474,7 +474,7 @@ python3 -m lqr_sweep.run_sweep --mode full \
 如果需要更明确地限制搜索范围，也可以手动覆盖：
 
 ```bash
---q-heading-range 1.0,6.0 --r-steering-range 3.0,25.0
+--q-heading-range 2.0,12.0 --r-steering-range 3.0,15.0
 ```
 
 ### RViz 可视化
