@@ -450,6 +450,33 @@ code/outputs/sweep/
 └── sweep_summary.json     # 扫描元数据（耗时、网格配置、各速度点最优参数）
 ```
 
+#### 低速航向优化 sweep
+
+如果原地图验证出现低速横向误差能通过、但航向误差偏大的情况，可以使用低速航向优化
+profile。该 profile 会提高 `mean/p95(e_psi)` 在目标函数中的权重，并默认使用
+`q_heading=1.0~6.0`、`R=3.0~25.0`，避免低速段总选到过低航向权重和过保守转向。
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.run_sweep --mode full \
+  --map-path /sim_ws/src/f1tenth_gym_ros/maps/stadium_3ms_open \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/stadium_3ms_trajectory.csv \
+  --speeds 0.5 0.625 0.75 0.875 1.0 \
+  --coarse-grid 5,4,5,3 \
+  --laps 3 \
+  --max-sim-time 420 \
+  --disable-curvature-speed-limit \
+  --disable-speed-ramp \
+  --objective-profile low-speed-heading \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium_low_speed_heading
+```
+
+如果需要更明确地限制搜索范围，也可以手动覆盖：
+
+```bash
+--q-heading-range 1.0,6.0 --r-steering-range 3.0,25.0
+```
+
 ### RViz 可视化
 
 启动后在 RViz 中 Add Display：

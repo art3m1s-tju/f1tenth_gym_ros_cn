@@ -1074,3 +1074,43 @@ evaluation_ros/<batch_name>/noisy_light_pos2cm_yaw1deg_delay60ms/
 ```
 
 推荐先跑 `clean` 作为基线，再跑 `light` 看 `mean_abs_e_y`、`p95_abs_e_y`、`max_abs_e_y`、`mean_abs_e_psi`、`steering_rate_rms` 是否明显恶化。若 clean 通过但 light 下误差或转向变化率明显放大，说明当前表对感知/定位扰动比较敏感，后续再考虑增大 `R`、降低高速度段激进程度或调速度规划。
+
+### 低速航向误差优化
+
+低速段补扫 `0.5, 0.625, 0.75, 0.875, 1.0m/s` 后，横向误差明显改善，但 `0.62~1.0m/s` 的航向误差仍偏大：
+
+- `0.62m/s`: `mean_abs_e_y=2.19cm`, `p95_abs_e_y=3.83cm`, `mean_abs_e_psi=4.21deg`, `p95_abs_e_psi=8.28deg`
+- `0.75m/s`: `mean_abs_e_y=1.86cm`, `p95_abs_e_y=3.26cm`, `mean_abs_e_psi=4.06deg`, `p95_abs_e_psi=8.05deg`
+- `1.0m/s`: `mean_abs_e_y=1.57cm`, `p95_abs_e_y=2.55cm`, `mean_abs_e_psi=3.87deg`, `p95_abs_e_psi=7.55deg`
+
+原因判断：原 sweep 目标函数主要由平均横向误差和平均航向误差组成，且低速 sweep 允许 `q_heading=0.5`、`R=30`。结果低速段容易选到“横向贴线但航向修正很弱”的保守控制器。
+
+解决方式：新增 `run_sweep.py` 的低速航向优化 profile：
+
+```
+--objective-profile low-speed-heading
+```
+
+该 profile 会：
+
+- 在目标函数中加入 `p95_abs_e_y` 和 `p95_abs_e_psi_deg`；
+- 提高 `mean/p95` 航向误差的排序权重；
+- 默认将 `q_heading` 搜索范围改为 `1.0~6.0`；
+- 默认将 `R` 搜索范围收窄为 `3.0~25.0`，避免候选长期顶到 `R=30`。
+
+推荐下一轮低速航向优化命令：
+
+```
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.run_sweep --mode full \
+  --map-path /sim_ws/src/f1tenth_gym_ros/maps/stadium_3ms_open \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/stadium_3ms_trajectory.csv \
+  --speeds 0.5 0.625 0.75 0.875 1.0 \
+  --coarse-grid 5,4,5,3 \
+  --laps 3 \
+  --max-sim-time 420 \
+  --disable-curvature-speed-limit \
+  --disable-speed-ramp \
+  --objective-profile low-speed-heading \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium_low_speed_heading
+```

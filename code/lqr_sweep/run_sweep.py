@@ -11,9 +11,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lqr_sweep.lookup_table import LqrParams, LqrLookupTable
-from lqr_sweep.objective import compute_objective
+from lqr_sweep.objective import (
+    DEFAULT_OBJECTIVE,
+    LOW_SPEED_HEADING_OBJECTIVE,
+    ObjectiveConfig,
+    compute_objective,
+)
 from lqr_sweep.sim_harness import SimConfig, run_single_sim, load_trajectory_cache
 from lqr_sweep.sweep_engine import SweepConfig, run_full_sweep, run_speed_point_sweep
+
+
+def _parse_float_range(text: str | None, name: str) -> tuple[float, float] | None:
+    """Parse a CLI range formatted as ``min,max``."""
+    if text is None:
+        return None
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 2:
+        raise ValueError(f"{name} must be formatted as min,max")
+    lo, hi = float(parts[0]), float(parts[1])
+    if lo <= 0.0 or hi <= 0.0 or lo > hi:
+        raise ValueError(f"{name} must satisfy 0 < min <= max")
+    return lo, hi
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +52,17 @@ def parse_args() -> argparse.Namespace:
                    default=[0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
     p.add_argument("--coarse-grid", default="5,4,5,3",
                    help="Grid sizes: q_lat,q_head,r_steer,ff_gain")
+    p.add_argument("--objective-profile", choices=["default", "low-speed-heading"],
+                   default="default",
+                   help="Use a heading-focused objective preset for low-speed sweeps")
+    p.add_argument("--q-lateral-range", default=None,
+                   help="Override q_lateral search range as min,max")
+    p.add_argument("--q-heading-range", default=None,
+                   help="Override q_heading search range as min,max")
+    p.add_argument("--r-steering-range", default=None,
+                   help="Override r_steering search range as min,max")
+    p.add_argument("--ff-gain-range", default=None,
+                   help="Override feedforward gain search range as min,max")
     p.add_argument("--max-workers", type=int, default=None)
     p.add_argument("--laps", type=int, default=5,
                    help="Number of consecutive laps required for each simulation")
@@ -62,6 +91,27 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _objective_config(profile: str) -> ObjectiveConfig:
+    """Return the objective preset selected by the CLI."""
+    if profile == "low-speed-heading":
+        return LOW_SPEED_HEADING_OBJECTIVE
+    return DEFAULT_OBJECTIVE
+
+
+def _sweep_range_overrides(args: argparse.Namespace) -> dict[str, tuple[float, float]]:
+    """Build SweepConfig range overrides from CLI arguments and presets."""
+    overrides = {
+        "q_lateral_range": _parse_float_range(args.q_lateral_range, "--q-lateral-range"),
+        "q_heading_range": _parse_float_range(args.q_heading_range, "--q-heading-range"),
+        "r_steering_range": _parse_float_range(args.r_steering_range, "--r-steering-range"),
+        "ff_gain_range": _parse_float_range(args.ff_gain_range, "--ff-gain-range"),
+    }
+    if args.objective_profile == "low-speed-heading":
+        overrides["q_heading_range"] = overrides["q_heading_range"] or (1.0, 6.0)
+        overrides["r_steering_range"] = overrides["r_steering_range"] or (3.0, 25.0)
+    return {key: value for key, value in overrides.items() if value is not None}
+
+
 def main() -> None:
     """根据命令行参数执行单次仿真、表验证或完整参数扫描。
 
@@ -73,6 +123,8 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    objective_config = _objective_config(args.objective_profile)
+    range_overrides = _sweep_range_overrides(args)
 
     min_eval_speed = min([args.speed] if args.mode == "single" else args.speeds)
     if args.max_sim_time is None:
@@ -107,7 +159,7 @@ def main() -> None:
         elapsed = time.time() - t0
         print(f"  Elapsed: {elapsed:.2f}s")
         if result.success:
-            score = compute_objective(result.metrics)
+            score = compute_objective(result.metrics, objective_config)
             print(f"  Lap time: {result.lap_time:.2f}s")
             print(f"  Score: {score:.4f}")
             for k, v in result.metrics.items():
@@ -127,7 +179,7 @@ def main() -> None:
             params = entry.to_params()
             result = run_single_sim(sim_config, params, entry.speed)
             if result.success:
-                score = compute_objective(result.metrics)
+                score = compute_objective(result.metrics, objective_config)
                 print(f"  v={entry.speed:.1f}: score={score:.4f} "
                       f"mean_ey={result.metrics['mean_abs_e_y']*100:.2f}cm "
                       f"lap={result.lap_time:.1f}s")
@@ -142,7 +194,9 @@ def main() -> None:
         sim_config=sim_config,
         speed_points=args.speeds,
         coarse_grid_sizes=grid_sizes,
+        objective_config=objective_config,
         max_workers=args.max_workers,
+        **range_overrides,
     )
 
     if args.mode == "coarse-only":
@@ -153,6 +207,11 @@ def main() -> None:
     print(f"  Grid: {grid_sizes}")
     print(f"  Laps: {args.laps}")
     print(f"  Max sim time per candidate: {max_sim_time:.1f}s")
+    print(f"  Objective profile: {args.objective_profile}")
+    print(f"  q_lateral range: {sweep_config.q_lateral_range}")
+    print(f"  q_heading range: {sweep_config.q_heading_range}")
+    print(f"  r_steering range: {sweep_config.r_steering_range}")
+    print(f"  ff_gain range: {sweep_config.ff_gain_range}")
     print(f"  Workers: {args.max_workers or 'auto'}")
     t0 = time.time()
 
@@ -169,6 +228,11 @@ def main() -> None:
         "sweep_time_s": elapsed,
         "speed_points": args.speeds,
         "grid_sizes": list(grid_sizes),
+        "objective_profile": args.objective_profile,
+        "q_lateral_range": list(sweep_config.q_lateral_range),
+        "q_heading_range": list(sweep_config.q_heading_range),
+        "r_steering_range": list(sweep_config.r_steering_range),
+        "ff_gain_range": list(sweep_config.ff_gain_range),
         "lap_count": args.laps,
         "max_sim_time": max_sim_time,
         "max_lateral_accel": args.max_lateral_accel,
