@@ -68,9 +68,12 @@ def run_ros_validation(
     max_steering_angle: float = 0.36,
     use_tf_pose: bool = False,
     enable_curvature_speed_limit: bool = True,
+    curvature_speed_lookahead_m: float = 1.0,
     enable_speed_ramp: bool = True,
     max_accel: float = 1.0,
     max_decel: float = 2.0,
+    enable_steering_rate_limit: bool = True,
+    max_steering_rate: float = 2.0,
     position_noise_std: float = 0.0,
     heading_noise_std_deg: float = 0.0,
     pose_delay_ms: float = 0.0,
@@ -127,9 +130,12 @@ def run_ros_validation(
         f"max_steering_angle:={max_steering_angle}",
         f"use_tf_pose:={str(use_tf_pose).lower()}",
         f"enable_curvature_speed_limit:={str(enable_curvature_speed_limit).lower()}",
+        f"curvature_speed_lookahead_m:={curvature_speed_lookahead_m}",
         f"enable_speed_ramp:={str(enable_speed_ramp).lower()}",
         f"max_accel:={max_accel}",
         f"max_decel:={max_decel}",
+        f"enable_steering_rate_limit:={str(enable_steering_rate_limit).lower()}",
+        f"max_steering_rate:={max_steering_rate}",
         f"validation_position_noise_std:={position_noise_std}",
         f"validation_heading_noise_std_deg:={heading_noise_std_deg}",
         f"validation_pose_delay_ms:={pose_delay_ms}",
@@ -147,8 +153,14 @@ def run_ros_validation(
     print(
         "  Speed handling: "
         f"curvature_limit={enable_curvature_speed_limit}, "
+        f"lookahead={curvature_speed_lookahead_m:.2f}m, "
         f"speed_ramp={enable_speed_ramp}, "
         f"min_speed={min_speed}, max_lat_accel={max_lateral_accel}"
+    )
+    print(
+        "  Steering handling: "
+        f"rate_limit={enable_steering_rate_limit}, "
+        f"max_rate={max_steering_rate:.2f}rad/s"
     )
     print(
         "  Validation noise: "
@@ -324,9 +336,12 @@ def run_batch_ros_validation(
     max_steering_angle: float,
     use_tf_pose: bool,
     enable_curvature_speed_limit: bool,
+    curvature_speed_lookahead_m: float,
     enable_speed_ramp: bool,
     max_accel: float,
     max_decel: float,
+    enable_steering_rate_limit: bool,
+    max_steering_rate: float,
     enable_rviz: bool,
     noise_profile: str,
     position_noise_std: float,
@@ -359,10 +374,13 @@ def run_batch_ros_validation(
                 "timeout_s",
                 "laps",
                 "curvature_limit",
+                "curvature_speed_lookahead_m",
                 "speed_ramp",
                 "max_lateral_accel",
                 "max_accel",
                 "max_decel",
+                "steering_rate_limit",
+                "max_steering_rate",
                 "noise_profile",
                 "position_noise_std",
                 "heading_noise_std_deg",
@@ -406,9 +424,12 @@ def run_batch_ros_validation(
                 max_steering_angle=max_steering_angle,
                 use_tf_pose=use_tf_pose,
                 enable_curvature_speed_limit=enable_curvature_speed_limit,
+                curvature_speed_lookahead_m=curvature_speed_lookahead_m,
                 enable_speed_ramp=enable_speed_ramp,
                 max_accel=max_accel,
                 max_decel=max_decel,
+                enable_steering_rate_limit=enable_steering_rate_limit,
+                max_steering_rate=max_steering_rate,
                 position_noise_std=position_noise_std,
                 heading_noise_std_deg=heading_noise_std_deg,
                 pose_delay_ms=pose_delay_ms,
@@ -428,10 +449,13 @@ def run_batch_ros_validation(
                     f"{timeout_seconds:.1f}",
                     lap_count,
                     int(enable_curvature_speed_limit),
+                    f"{curvature_speed_lookahead_m:.3f}",
                     int(enable_speed_ramp),
                     f"{max_lateral_accel:.3f}",
                     f"{max_accel:.3f}",
                     f"{max_decel:.3f}",
+                    int(enable_steering_rate_limit),
+                    f"{max_steering_rate:.3f}",
                     noise_profile,
                     f"{position_noise_std:.4f}",
                     f"{heading_noise_std_deg:.4f}",
@@ -481,6 +505,23 @@ if __name__ == "__main__":
     p.add_argument("--max-lateral-accel", type=float, default=4.0)
     p.add_argument("--max-steering-angle", type=float, default=0.36)
     p.add_argument("--use-tf-pose", action="store_true")
+    p.add_argument(
+        "--curvature-speed-lookahead-m",
+        type=float,
+        default=1.0,
+        help="Forward path distance used to preview max curvature for speed limiting.",
+    )
+    p.add_argument(
+        "--disable-steering-rate-limit",
+        action="store_true",
+        help="Disable steering command rate limiting during ROS validation.",
+    )
+    p.add_argument(
+        "--max-steering-rate",
+        type=float,
+        default=2.0,
+        help="Maximum steering command rate in rad/s when rate limiting is enabled.",
+    )
     p.add_argument(
         "--noise-profile",
         choices=["clean", "light"],
@@ -553,9 +594,12 @@ if __name__ == "__main__":
             max_steering_angle=args.max_steering_angle,
             use_tf_pose=args.use_tf_pose,
             enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
+            curvature_speed_lookahead_m=args.curvature_speed_lookahead_m,
             enable_speed_ramp=not args.disable_speed_ramp,
             max_accel=args.max_accel,
             max_decel=args.max_decel,
+            enable_steering_rate_limit=not args.disable_steering_rate_limit,
+            max_steering_rate=args.max_steering_rate,
             enable_rviz=not args.disable_rviz,
             noise_profile=args.noise_profile,
             position_noise_std=position_noise_std,
@@ -579,9 +623,12 @@ if __name__ == "__main__":
             max_steering_angle=args.max_steering_angle,
             use_tf_pose=args.use_tf_pose,
             enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
+            curvature_speed_lookahead_m=args.curvature_speed_lookahead_m,
             enable_speed_ramp=not args.disable_speed_ramp,
             max_accel=args.max_accel,
             max_decel=args.max_decel,
+            enable_steering_rate_limit=not args.disable_steering_rate_limit,
+            max_steering_rate=args.max_steering_rate,
             position_noise_std=position_noise_std,
             heading_noise_std_deg=heading_noise_std_deg,
             pose_delay_ms=pose_delay_ms,

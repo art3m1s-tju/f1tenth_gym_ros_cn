@@ -1260,3 +1260,64 @@ delta_limited = delta_prev + clamp(delta_raw - delta_prev,
 - `3.0m/s` 若仍不安全，则将实车上限暂定为 `2.0~2.5m/s`。
 
 clean 通过后再做 `light` noisy 压力测试。noisy 结果只作为鲁棒性参考，不直接用于决定是否上实车高速。
+
+### 2026-05-17 第二阶段实现记录：预瞄限速与转角速率限制
+
+已在 `stage/speed-planning-steering-rate` worktree 开始实现第二阶段功能，目标是降低原地图
+`3.0m/s` 下过大的 `delta_cmd` 高频变化和转角饱和风险。
+
+本次代码改动：
+
+- `pnc_rc/lqr/controller.py`
+  - 新增 `curvature_speed_lookahead_m`，默认 `1.0m`；
+  - 新增路径段长度缓存 `segment_lengths`；
+  - 每个控制周期从当前投影点沿路径向前扫描 `1.0m`，取窗口内最大绝对曲率作为
+    `curvature_preview`；
+  - 曲率限速从原来的当前点曲率改为预瞄曲率：
+    `v_curve=sqrt(max_lateral_accel / max(curvature_preview, eps))`；
+  - 新增 `enable_steering_rate_limit` 和 `max_steering_rate`，默认启用，
+    初始值 `2.0rad/s`；
+  - 转角命令先由 LQR 计算并按 `max_steering_angle` 裁剪，再按每周期最大变化量
+    `max_steering_rate * dt` 进行限幅；
+  - 日志新增 `curvature_preview`、`delta_raw`、`delta_rate_limited` 三列，用于区分
+    LQR 原始转角、最终执行转角以及是否被速率限制命中。
+
+- `launch/pnc_sim_launch.py`
+  - 新增 launch 参数：`curvature_speed_lookahead_m`、`enable_steering_rate_limit`、
+    `max_steering_rate`；
+  - ROS validate 可以直接通过命令行切换预瞄距离和转角速率限制。
+
+- `lqr_sweep/validate_ros.py`
+  - batch/single 验证支持 `--curvature-speed-lookahead-m`、
+    `--disable-steering-rate-limit`、`--max-steering-rate`；
+  - manifest 会记录预瞄距离、是否开启转角速率限制、最大转角速率；
+  - launch 输出中打印速度处理和转角处理配置，方便回看实验条件。
+
+第一轮建议测试：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --max-steering-rate 2.0 \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_rate2p0_clean_100s
+```
+
+验收重点：
+
+- `3.0m/s` 的 `delta_rate p95/max` 和 `steering_rate_rms` 应明显下降；
+- `delta_cmd` 不应长时间贴着 `±0.36rad`；
+- `p95_abs_e_y` 和 `max_abs_e_y` 不能明显恶化；
+- 如果出现转不过弯，先降低 `max_lateral_accel` 到 `3.0~3.2` 或将预瞄距离增大到
+  `1.5m`，再考虑把 `max_steering_rate` 放宽到 `3.0rad/s`。

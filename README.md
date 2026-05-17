@@ -431,6 +431,67 @@ original_map_table_curvlimit_ramp_0p5_to_3p0_150s
 `tracker_evaluate.py` 失败，脚本会在对应 `evaluation/` 目录写入
 `evaluation_failed.txt`，并在 `logs/*_evaluator.log` 中保存失败原因，不再只留下空目录。
 
+#### 第二阶段：预瞄限速 + 转角速率限制验证
+
+第二阶段用于验证原地图高速段，重点降低 `3.0m/s` 下过大的转角变化率。需要从
+stage2 worktree 启动容器，确保容器内挂载的是当前阶段代码：
+
+```bash
+cd /home/art3m1s/f1tenth_stage2_speed_planning
+rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+进入容器后先跑 clean 验证：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --max-steering-rate 2.0 \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_rate2p0_clean_100s
+```
+
+如果想确认转角速率限制本身带来的变化，可以保持其它参数不变，关掉 rate limit 做对照：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_clean_100s
+```
+
+新日志字段包括 `curvature_preview`、`delta_raw`、`delta_rate_limited`。评估时重点比较：
+`delta_cmd` 峰值、`steering_rate_rms`、`delta_rate p95/max`、`steering_saturation_ratio`、
+`p95_abs_e_y` 和 `max_abs_e_y`。如果转角变平滑但横向误差明显变差，优先降低
+`max_lateral_accel` 或把 `curvature-speed-lookahead-m` 从 `1.0` 增加到 `1.5`，最后再放宽
+`max-steering-rate`。
+
 #### 扫描时间估算
 
 | 模式 | 速度点数 | 网格规模 | 预计耗时 |

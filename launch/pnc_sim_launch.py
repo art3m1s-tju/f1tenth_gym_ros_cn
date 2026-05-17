@@ -32,9 +32,12 @@ def generate_launch_description():
         DeclareLaunchArgument('max_steering_angle', default_value='0.36'),
         DeclareLaunchArgument('use_tf_pose', default_value='true'),
         DeclareLaunchArgument('enable_curvature_speed_limit', default_value='true'),
+        DeclareLaunchArgument('curvature_speed_lookahead_m', default_value='1.0'),
         DeclareLaunchArgument('enable_speed_ramp', default_value='true'),
         DeclareLaunchArgument('max_accel', default_value='1.0'),
         DeclareLaunchArgument('max_decel', default_value='2.0'),
+        DeclareLaunchArgument('enable_steering_rate_limit', default_value='true'),
+        DeclareLaunchArgument('max_steering_rate', default_value='2.0'),
         DeclareLaunchArgument('validation_position_noise_std', default_value='0.0'),
         DeclareLaunchArgument('validation_heading_noise_std_deg', default_value='0.0'),
         DeclareLaunchArgument('validation_pose_delay_ms', default_value='0.0'),
@@ -122,9 +125,16 @@ def generate_launch_description():
         curvature_speed_limit = LaunchConfiguration(
             'enable_curvature_speed_limit'
         ).perform(context)
+        curvature_lookahead = LaunchConfiguration(
+            'curvature_speed_lookahead_m'
+        ).perform(context)
         speed_ramp = LaunchConfiguration('enable_speed_ramp').perform(context)
         accel = LaunchConfiguration('max_accel').perform(context)
         decel = LaunchConfiguration('max_decel').perform(context)
+        steering_rate_limit = LaunchConfiguration(
+            'enable_steering_rate_limit'
+        ).perform(context)
+        max_steering_rate = LaunchConfiguration('max_steering_rate').perform(context)
         position_noise = LaunchConfiguration('validation_position_noise_std').perform(context)
         heading_noise = LaunchConfiguration('validation_heading_noise_std_deg').perform(context)
         pose_delay = LaunchConfiguration('validation_pose_delay_ms').perform(context)
@@ -177,9 +187,12 @@ def generate_launch_description():
             '-p', f'max_steering_angle:={max_steer}',
             '-p', f'max_lateral_accel:={max_lat_accel}',
             '-p', f'enable_curvature_speed_limit:={curvature_speed_limit}',
+            '-p', f'curvature_speed_lookahead_m:={curvature_lookahead}',
             '-p', f'enable_speed_ramp:={speed_ramp}',
             '-p', f'max_accel:={accel}',
             '-p', f'max_decel:={decel}',
+            '-p', f'enable_steering_rate_limit:={steering_rate_limit}',
+            '-p', f'max_steering_rate:={max_steering_rate}',
             '-p', f'validation_position_noise_std:={position_noise}',
             '-p', f'validation_heading_noise_std_deg:={heading_noise}',
             '-p', f'validation_pose_delay_ms:={pose_delay}',
