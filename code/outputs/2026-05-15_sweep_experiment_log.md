@@ -1569,3 +1569,60 @@ lqr_model_speed = max(v_actual, current_speed_cmd, lqr_min_model_speed)
 1. 重新跑 `max_lateral_accel=3.5`、rate limit 关闭，确认速度一致性修复后的基线；
 2. 再跑 `max_lateral_accel=3.0`，看保守速度规划是否开始真正改善误差；
 3. 若仍不够，再测试 `lookahead=1.5m`，而不是恢复硬 steering rate limit。
+
+### 2026-05-17 Stage2 速度一致性修复后 clean 基线
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_speed_consistent_preview1p0_no_rate_limit_alat3p5_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- LQR lookup table：按 `max(v_actual, current_speed_cmd, lqr_min_model_speed)` 在线插值
+- 噪声：clean
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 0.84 cm | 1.98 cm | 2.58 cm | 2.60 deg | 4.91 deg | 26.1 deg/s | 58.6 deg/s | 18.26 deg | 0.0% |
+| 2.5 | 0.91 cm | 2.22 cm | 2.70 cm | 2.43 deg | 4.98 deg | 31.5 deg/s | 74.5 deg/s | 18.44 deg | 0.0% |
+| 3.0 | 0.89 cm | 2.13 cm | 2.62 cm | 2.37 deg | 4.97 deg | 33.9 deg/s | 80.8 deg/s | 18.36 deg | 0.0% |
+
+对比旧 no-rate-limit 但按 `target_speed` 插表的 3.0m/s 结果：
+
+| 指标 | 旧逻辑 | 速度一致性修复后 |
+|------|-------:|----------------:|
+| mean e_y | 3.45 cm | 0.89 cm |
+| p95 e_y | 6.59 cm | 2.13 cm |
+| max e_y | 7.21 cm | 2.62 cm |
+| mean e_psi | 2.35 deg | 2.37 deg |
+| p95 e_psi | 4.33 deg | 4.97 deg |
+| steering_rate_rms | 39.9 deg/s | 33.9 deg/s |
+| steering_rate_p95 | 97.1 deg/s | 80.8 deg/s |
+| max delta | 19.60 deg | 18.36 deg |
+| sat ratio | 0.0% | 0.0% |
+
+结论：
+
+1. 速度一致性修复效果非常明显，3.0m/s 横向误差从不可接受区间降到较好水平；
+2. 原先 `max_lateral_accel=3.0` 变差的主要原因不是速度规划本身，而是 LQR 仍按
+   `target_speed=3.0m/s` 插表和建模；
+3. 当前 `max_lateral_accel=3.5`、`lookahead=1.0m`、rate limit 关闭是 Stage2 clean
+   验证中目前最好的组合；
+4. 3.0m/s clean 仿真已满足横向误差和转角饱和要求，但航向 p95 仍约 `5deg`，实车前仍需
+   noisy/light 验证；
+5. 简单硬 steering rate limiter 暂时不再使用。
+
+下一步：
+
+- 用同一套速度一致性修复代码跑 `max_lateral_accel=3.0` 对照，确认是否需要更保守速度；
+- 如果 `3.5` 已经优于 `3.0`，则保持 `3.5`，进入 light noise/latency 验证；
+- 实车策略仍建议从 `2.0~2.5m/s` 开始，确认定位和执行器正常后再逐步试 `3.0m/s`。
