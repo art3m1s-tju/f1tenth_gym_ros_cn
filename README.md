@@ -431,6 +431,286 @@ original_map_table_curvlimit_ramp_0p5_to_3p0_150s
 `tracker_evaluate.py` 失败，脚本会在对应 `evaluation/` 目录写入
 `evaluation_failed.txt`，并在 `logs/*_evaluator.log` 中保存失败原因，不再只留下空目录。
 
+#### 第二阶段：预瞄限速 + 转角速率限制验证
+
+第二阶段用于验证原地图高速段，重点降低 `3.0m/s` 下过大的转角变化率。需要从
+stage2 worktree 启动容器，确保容器内挂载的是当前阶段代码：
+
+```bash
+cd /home/art3m1s/f1tenth_stage2_speed_planning
+rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+进入容器后先跑 clean 验证：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --max-steering-rate 2.0 \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_rate2p0_clean_100s
+```
+
+如果想确认转角速率限制本身带来的变化，可以保持其它参数不变，关掉 rate limit 做对照：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_clean_100s
+```
+
+如果关掉 rate limit 后 `steering_rate` 反而下降，说明前一轮锯齿主要来自硬限幅。Stage2
+后续还修复了一个速度一致性问题：曲率限速降低 `v_cmd/v_actual` 后，LQR 模型速度和 lookup table
+插值也会跟随实际/命令速度，而不是继续按 `target_speed` 计算。因此改完代码后先重跑
+`max_lateral_accel=3.5` 作为新基线：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_speed_consistent_preview1p0_no_rate_limit_alat3p5_clean_100s
+```
+
+然后保持 rate limit 关闭，测试更保守的曲率速度规划：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_speed_consistent_preview1p0_no_rate_limit_alat3p0_clean_100s
+```
+
+如果 `3.0m/s` 仍然频繁打满转角，再试 `max_lateral_accel=2.5`：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 2.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_alat2p5_clean_100s
+```
+
+新日志字段包括 `curvature_preview`、`delta_raw`、`delta_rate_limited`。评估时重点比较：
+`delta_cmd` 峰值、`steering_rate_rms`、`delta_rate p95/max`、`steering_saturation_ratio`、
+`p95_abs_e_y` 和 `max_abs_e_y`。如果转角变平滑但横向误差明显变差，优先降低
+`max_lateral_accel` 或把 `curvature-speed-lookahead-m` 从 `1.0` 增加到 `1.5`，最后再放宽
+`max-steering-rate`。
+
+如果 clean 通过但 `--noise-profile light` 明显恶化，不要直接调 QR，先拆分噪声来源。下面三组命令都使用
+速度一致性修复后的基线参数，并关闭 steering rate limit。
+
+delay-only：只测试 `60ms` 位姿延迟。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --pose-delay-ms 60 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_delay60ms_alat3p5_clean_100s
+```
+
+position-only：只测试 `2cm` 位置噪声。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --position-noise-std 0.02 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_pos2cm_alat3p5_clean_100s
+```
+
+heading-only：只测试 `1deg` 航向噪声。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --heading-noise-std-deg 1.0 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_yaw1deg_alat3p5_clean_100s
+```
+
+误差滤波验证：在 yaw/position/full-light 噪声下打开 `e_y/e_psi` 低通滤波。评估仍使用真实
+`e_y/e_psi`，新增日志字段 `control_e_y/control_e_psi/filtered_e_y/filtered_e_psi`
+用于查看滤波前后的控制误差。建议先用 `alpha_y=0.30`、`alpha_psi=0.25`。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_filter_light_alphaY0p30_alphaPsi0p25_100s
+```
+
+若只想拆分滤波效果，把上面命令中的 `--noise-profile light` 换成：
+
+```bash
+--noise-profile clean --position-noise-std 0.02
+```
+
+或：
+
+```bash
+--noise-profile clean --heading-noise-std-deg 1.0
+```
+
+如果 delay-only 就明显变差，优先处理延迟补偿、降低高速上限或增大曲率预瞄；如果 position-only
+明显变差，优先滤波 `x/y` 或 `e_y`；如果 heading-only 明显变差，优先滤波 yaw 或 `e_psi`。
+
+Stage2 当前推荐基线：
+
+```text
+max_lateral_accel = 3.0
+curvature_speed_lookahead_m = 2.0
+enable_error_filter = true
+error_filter_alpha_y = 0.30
+error_filter_alpha_psi = 0.25
+enable_steering_rate_limit = false
+```
+
+极限 RViz 可视化检查用 `3.0m/s + light noise` 跑一组单次测试。这里故意不加
+`--disable-rviz`，用于肉眼观察高速入弯、减速时机、车身姿态、转角饱和和蛇形：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode single \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 2.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/stage2_rviz_limit_baseline_v3p0_light
+```
+
+看 RViz 时重点观察：
+
+- 入弯前是否已经开始降速，而不是到了弯心才降；
+- `delta_cmd` 是否长时间贴近 `±0.36rad`；
+- 车尾/车头是否出现肉眼可见左右摆动；
+- 如果 3.0m/s 看起来紧张，实车首轮应从 `2.0m/s` 或 `2.5m/s` 开始。
+
 #### 扫描时间估算
 
 | 模式 | 速度点数 | 网格规模 | 预计耗时 |

@@ -68,13 +68,19 @@ def run_ros_validation(
     max_steering_angle: float = 0.36,
     use_tf_pose: bool = False,
     enable_curvature_speed_limit: bool = True,
+    curvature_speed_lookahead_m: float = 1.0,
     enable_speed_ramp: bool = True,
     max_accel: float = 1.0,
     max_decel: float = 2.0,
+    enable_steering_rate_limit: bool = True,
+    max_steering_rate: float = 2.0,
     position_noise_std: float = 0.0,
     heading_noise_std_deg: float = 0.0,
     pose_delay_ms: float = 0.0,
     noise_seed: int = 42,
+    enable_error_filter: bool = False,
+    error_filter_alpha_y: float = 0.30,
+    error_filter_alpha_psi: float = 0.25,
     launch_log_path: Path | None = None,
     evaluator_log_path: Path | None = None,
     enable_rviz: bool = True,
@@ -127,13 +133,19 @@ def run_ros_validation(
         f"max_steering_angle:={max_steering_angle}",
         f"use_tf_pose:={str(use_tf_pose).lower()}",
         f"enable_curvature_speed_limit:={str(enable_curvature_speed_limit).lower()}",
+        f"curvature_speed_lookahead_m:={curvature_speed_lookahead_m}",
         f"enable_speed_ramp:={str(enable_speed_ramp).lower()}",
         f"max_accel:={max_accel}",
         f"max_decel:={max_decel}",
+        f"enable_steering_rate_limit:={str(enable_steering_rate_limit).lower()}",
+        f"max_steering_rate:={max_steering_rate}",
         f"validation_position_noise_std:={position_noise_std}",
         f"validation_heading_noise_std_deg:={heading_noise_std_deg}",
         f"validation_pose_delay_ms:={pose_delay_ms}",
         f"validation_noise_seed:={noise_seed}",
+        f"enable_error_filter:={str(enable_error_filter).lower()}",
+        f"error_filter_alpha_y:={error_filter_alpha_y}",
+        f"error_filter_alpha_psi:={error_filter_alpha_psi}",
         f"track_csv:={track_csv}",
         f"trajectory_csv:={trajectory_csv}",
         f"log_path:={log_path}",
@@ -147,14 +159,26 @@ def run_ros_validation(
     print(
         "  Speed handling: "
         f"curvature_limit={enable_curvature_speed_limit}, "
+        f"lookahead={curvature_speed_lookahead_m:.2f}m, "
         f"speed_ramp={enable_speed_ramp}, "
         f"min_speed={min_speed}, max_lat_accel={max_lateral_accel}"
+    )
+    print(
+        "  Steering handling: "
+        f"rate_limit={enable_steering_rate_limit}, "
+        f"max_rate={max_steering_rate:.2f}rad/s"
     )
     print(
         "  Validation noise: "
         f"pos={position_noise_std:.3f}m, "
         f"heading={heading_noise_std_deg:.2f}deg, "
         f"delay={pose_delay_ms:.0f}ms, seed={noise_seed}"
+    )
+    print(
+        "  Error filter: "
+        f"enabled={enable_error_filter}, "
+        f"alpha_y={error_filter_alpha_y:.2f}, "
+        f"alpha_psi={error_filter_alpha_psi:.2f}"
     )
 
     launch_log_file = None
@@ -204,6 +228,7 @@ def run_ros_validation(
         "--log", str(log_file),
         "--reference-trajectory-csv", trajectory_csv,
         "--output-dir", str(output_dir),
+        "--steering-limit-rad", str(max_steering_angle),
     ]
     print("  Running evaluation...")
     evaluator_log_file = None
@@ -324,15 +349,21 @@ def run_batch_ros_validation(
     max_steering_angle: float,
     use_tf_pose: bool,
     enable_curvature_speed_limit: bool,
+    curvature_speed_lookahead_m: float,
     enable_speed_ramp: bool,
     max_accel: float,
     max_decel: float,
+    enable_steering_rate_limit: bool,
+    max_steering_rate: float,
     enable_rviz: bool,
     noise_profile: str,
     position_noise_std: float,
     heading_noise_std_deg: float,
     pose_delay_ms: float,
     noise_seed: int,
+    enable_error_filter: bool,
+    error_filter_alpha_y: float,
+    error_filter_alpha_psi: float,
 ) -> None:
     """Run ROS/RViz validation for multiple speeds and archive each run."""
     noise_folder = _noise_folder_name(
@@ -359,15 +390,21 @@ def run_batch_ros_validation(
                 "timeout_s",
                 "laps",
                 "curvature_limit",
+                "curvature_speed_lookahead_m",
                 "speed_ramp",
                 "max_lateral_accel",
                 "max_accel",
                 "max_decel",
+                "steering_rate_limit",
+                "max_steering_rate",
                 "noise_profile",
                 "position_noise_std",
                 "heading_noise_std_deg",
                 "pose_delay_ms",
                 "noise_seed",
+                "error_filter",
+                "error_filter_alpha_y",
+                "error_filter_alpha_psi",
             ]
         )
 
@@ -406,13 +443,19 @@ def run_batch_ros_validation(
                 max_steering_angle=max_steering_angle,
                 use_tf_pose=use_tf_pose,
                 enable_curvature_speed_limit=enable_curvature_speed_limit,
+                curvature_speed_lookahead_m=curvature_speed_lookahead_m,
                 enable_speed_ramp=enable_speed_ramp,
                 max_accel=max_accel,
                 max_decel=max_decel,
+                enable_steering_rate_limit=enable_steering_rate_limit,
+                max_steering_rate=max_steering_rate,
                 position_noise_std=position_noise_std,
                 heading_noise_std_deg=heading_noise_std_deg,
                 pose_delay_ms=pose_delay_ms,
                 noise_seed=noise_seed,
+                enable_error_filter=enable_error_filter,
+                error_filter_alpha_y=error_filter_alpha_y,
+                error_filter_alpha_psi=error_filter_alpha_psi,
                 launch_log_path=launch_log,
                 evaluator_log_path=evaluator_log,
                 enable_rviz=enable_rviz,
@@ -428,15 +471,21 @@ def run_batch_ros_validation(
                     f"{timeout_seconds:.1f}",
                     lap_count,
                     int(enable_curvature_speed_limit),
+                    f"{curvature_speed_lookahead_m:.3f}",
                     int(enable_speed_ramp),
                     f"{max_lateral_accel:.3f}",
                     f"{max_accel:.3f}",
                     f"{max_decel:.3f}",
+                    int(enable_steering_rate_limit),
+                    f"{max_steering_rate:.3f}",
                     noise_profile,
                     f"{position_noise_std:.4f}",
                     f"{heading_noise_std_deg:.4f}",
                     f"{pose_delay_ms:.1f}",
                     noise_seed,
+                    int(enable_error_filter),
+                    f"{error_filter_alpha_y:.3f}",
+                    f"{error_filter_alpha_psi:.3f}",
                 ]
             )
             f.flush()
@@ -482,6 +531,23 @@ if __name__ == "__main__":
     p.add_argument("--max-steering-angle", type=float, default=0.36)
     p.add_argument("--use-tf-pose", action="store_true")
     p.add_argument(
+        "--curvature-speed-lookahead-m",
+        type=float,
+        default=1.0,
+        help="Forward path distance used to preview max curvature for speed limiting.",
+    )
+    p.add_argument(
+        "--disable-steering-rate-limit",
+        action="store_true",
+        help="Disable steering command rate limiting during ROS validation.",
+    )
+    p.add_argument(
+        "--max-steering-rate",
+        type=float,
+        default=2.0,
+        help="Maximum steering command rate in rad/s when rate limiting is enabled.",
+    )
+    p.add_argument(
         "--noise-profile",
         choices=["clean", "light"],
         default="clean",
@@ -509,6 +575,23 @@ if __name__ == "__main__":
         help="Override validation pose delay in milliseconds.",
     )
     p.add_argument("--noise-seed", type=int, default=42)
+    p.add_argument(
+        "--enable-error-filter",
+        action="store_true",
+        help="Low-pass control e_y/e_psi before LQR feedback; true e_y/e_psi are still logged for evaluation.",
+    )
+    p.add_argument(
+        "--error-filter-alpha-y",
+        type=float,
+        default=0.30,
+        help="First-order low-pass alpha for lateral control error.",
+    )
+    p.add_argument(
+        "--error-filter-alpha-psi",
+        type=float,
+        default=0.25,
+        help="First-order low-pass alpha for heading control error.",
+    )
     p.add_argument(
         "--disable-curvature-speed-limit",
         action="store_true",
@@ -553,15 +636,21 @@ if __name__ == "__main__":
             max_steering_angle=args.max_steering_angle,
             use_tf_pose=args.use_tf_pose,
             enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
+            curvature_speed_lookahead_m=args.curvature_speed_lookahead_m,
             enable_speed_ramp=not args.disable_speed_ramp,
             max_accel=args.max_accel,
             max_decel=args.max_decel,
+            enable_steering_rate_limit=not args.disable_steering_rate_limit,
+            max_steering_rate=args.max_steering_rate,
             enable_rviz=not args.disable_rviz,
             noise_profile=args.noise_profile,
             position_noise_std=position_noise_std,
             heading_noise_std_deg=heading_noise_std_deg,
             pose_delay_ms=pose_delay_ms,
             noise_seed=args.noise_seed,
+            enable_error_filter=args.enable_error_filter,
+            error_filter_alpha_y=args.error_filter_alpha_y,
+            error_filter_alpha_psi=args.error_filter_alpha_psi,
         )
     else:
         out = Path(args.output_dir) if args.output_dir else None
@@ -579,12 +668,18 @@ if __name__ == "__main__":
             max_steering_angle=args.max_steering_angle,
             use_tf_pose=args.use_tf_pose,
             enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
+            curvature_speed_lookahead_m=args.curvature_speed_lookahead_m,
             enable_speed_ramp=not args.disable_speed_ramp,
             max_accel=args.max_accel,
             max_decel=args.max_decel,
+            enable_steering_rate_limit=not args.disable_steering_rate_limit,
+            max_steering_rate=args.max_steering_rate,
             position_noise_std=position_noise_std,
             heading_noise_std_deg=heading_noise_std_deg,
             pose_delay_ms=pose_delay_ms,
             noise_seed=args.noise_seed,
+            enable_error_filter=args.enable_error_filter,
+            error_filter_alpha_y=args.error_filter_alpha_y,
+            error_filter_alpha_psi=args.error_filter_alpha_psi,
             enable_rviz=not args.disable_rviz,
         )

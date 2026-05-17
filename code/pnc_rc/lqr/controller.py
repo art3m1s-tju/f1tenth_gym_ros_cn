@@ -128,13 +128,19 @@ class LqrController(Node):
         self.declare_parameter("max_steering_angle", 0.61)
         self.declare_parameter("max_lateral_accel", 3.0)
         self.declare_parameter("enable_curvature_speed_limit", True)
+        self.declare_parameter("curvature_speed_lookahead_m", 1.0)
         self.declare_parameter("enable_speed_ramp", True)
         self.declare_parameter("max_accel", 0.8)
         self.declare_parameter("max_decel", 1.5)
+        self.declare_parameter("enable_steering_rate_limit", True)
+        self.declare_parameter("max_steering_rate", 2.0)
         self.declare_parameter("validation_position_noise_std", 0.0)
         self.declare_parameter("validation_heading_noise_std_deg", 0.0)
         self.declare_parameter("validation_pose_delay_ms", 0.0)
         self.declare_parameter("validation_noise_seed", 42)
+        self.declare_parameter("enable_error_filter", False)
+        self.declare_parameter("error_filter_alpha_y", 0.30)
+        self.declare_parameter("error_filter_alpha_psi", 0.25)
 
         # ---- LQR 核心参数 ----
         self.declare_parameter("control_dt", 0.05)
@@ -183,9 +189,20 @@ class LqrController(Node):
         self.enable_curvature_speed_limit = bool(
             self.get_parameter("enable_curvature_speed_limit").value
         )
+        self.curvature_speed_lookahead_m = max(
+            0.0,
+            float(self.get_parameter("curvature_speed_lookahead_m").value),
+        )
         self.enable_speed_ramp = bool(self.get_parameter("enable_speed_ramp").value)
         self.max_accel = max(0.0, float(self.get_parameter("max_accel").value))
         self.max_decel = max(0.0, float(self.get_parameter("max_decel").value))
+        self.enable_steering_rate_limit = bool(
+            self.get_parameter("enable_steering_rate_limit").value
+        )
+        self.max_steering_rate = max(
+            0.0,
+            float(self.get_parameter("max_steering_rate").value),
+        )
         self.validation_position_noise_std = max(
             0.0,
             float(self.get_parameter("validation_position_noise_std").value),
@@ -197,6 +214,13 @@ class LqrController(Node):
             max(0.0, float(self.get_parameter("validation_pose_delay_ms").value)) / 1000.0
         )
         self.validation_noise_seed = int(self.get_parameter("validation_noise_seed").value)
+        self.enable_error_filter = bool(self.get_parameter("enable_error_filter").value)
+        self.error_filter_alpha_y = float(
+            np.clip(float(self.get_parameter("error_filter_alpha_y").value), 0.0, 1.0)
+        )
+        self.error_filter_alpha_psi = float(
+            np.clip(float(self.get_parameter("error_filter_alpha_psi").value), 0.0, 1.0)
+        )
 
         self.control_dt = max(1e-4, float(self.get_parameter("control_dt").value))
         self.lqr_min_model_speed = max(
@@ -236,11 +260,15 @@ class LqrController(Node):
         self.points: np.ndarray | None = None  # 参考路径点数组 [N, 2]
         self.headings: np.ndarray | None = None  # 每个路径点的切向航向角
         self.curvatures: np.ndarray | None = None  # 每个路径点的有符号曲率
+        self.segment_lengths: np.ndarray | None = None  # 每个路径段长度
         self.kdtree: KDTree | None = None  # 路径点空间索引
         self.path_frame_id = "map"
         self.previous_stamp_sec: float | None = None
+        self.previous_delta_cmd = 0.0
         self.current_speed_cmd = 0.0  # 速度斜坡当前值
         self.open_loop_finished = False
+        self.filtered_lateral_error: float | None = None
+        self.filtered_heading_error: float | None = None
         self.pose_history = deque()
         self.noise_rng = np.random.default_rng(self.validation_noise_seed)
         self.csv_file = None
@@ -293,9 +321,14 @@ class LqrController(Node):
             f"(path_topic={self.path_topic}, odom_topic={self.odom_topic}, "
             f"drive_topic={self.drive_topic}, use_tf_pose={self.use_tf_pose}, "
             f"target_speed={self.target_speed:.2f}, "
+            f"curvature_lookahead={self.curvature_speed_lookahead_m:.2f}m, "
+            f"steering_rate_limit={self.enable_steering_rate_limit}"
+            f"/{self.max_steering_rate:.2f}rad/s, "
             f"validation_noise=({self.validation_position_noise_std:.3f}m, "
             f"{math.degrees(self.validation_heading_noise_std):.2f}deg, "
             f"{self.validation_pose_delay_sec * 1000.0:.0f}ms), "
+            f"error_filter={self.enable_error_filter}"
+            f"/({self.error_filter_alpha_y:.2f}, {self.error_filter_alpha_psi:.2f}), "
             f"Q=({self.lqr_q_lateral:.2f}, {self.lqr_q_heading:.2f}), "
             f"R={self.lqr_r_steering:.2f})."
         )
@@ -319,7 +352,14 @@ class LqrController(Node):
                 "v_cmd",
                 "e_y",
                 "e_psi",
+                "control_e_y",
+                "control_e_psi",
+                "filtered_e_y",
+                "filtered_e_psi",
                 "curvature_ref",
+                "curvature_preview",
+                "delta_raw",
+                "delta_rate_limited",
                 "delta_feedback",
                 "delta_feedforward",
                 "delta_cmd",
@@ -365,13 +405,24 @@ class LqrController(Node):
         self.points = points
         self.headings = compute_path_headings(points, self.path_closed_loop)
         self.curvatures = compute_path_curvatures(points, self.path_closed_loop)
+        self.segment_lengths = self._compute_segment_lengths(points)
         self.kdtree = KDTree(points)
         self.path_frame_id = msg.header.frame_id or self.tracked_frame or "map"
         self.open_loop_finished = False
+        self.previous_delta_cmd = 0.0
+        self.filtered_lateral_error = None
+        self.filtered_heading_error = None
         self.get_logger().info(
             f"Loaded LQR reference path with {len(points)} points "
             f"(frame={self.path_frame_id}, closed_loop={self.path_closed_loop})."
         )
+
+    def _compute_segment_lengths(self, points: np.ndarray) -> np.ndarray:
+        """计算参考轨迹每个路径段的长度。"""
+        if self.path_closed_loop:
+            next_points = np.roll(points, -1, axis=0)
+            return np.linalg.norm(next_points - points, axis=1)
+        return np.linalg.norm(points[1:] - points[:-1], axis=1)
 
     def _resolve_pose(self, msg: Odometry, stamp) -> tuple[np.ndarray, float] | None:
         """解析车辆在路径坐标系下的位姿。
@@ -482,6 +533,71 @@ class LqrController(Node):
             )
         return control_position, control_yaw
 
+    def _filter_control_errors(
+        self,
+        lateral_error: float,
+        heading_error: float,
+    ) -> tuple[float, float]:
+        """Low-pass control errors before LQR feedback when validation noise is enabled."""
+        if not self.enable_error_filter:
+            self.filtered_lateral_error = None
+            self.filtered_heading_error = None
+            return lateral_error, heading_error
+
+        if self.filtered_lateral_error is None or self.filtered_heading_error is None:
+            self.filtered_lateral_error = lateral_error
+            self.filtered_heading_error = heading_error
+            return lateral_error, heading_error
+
+        self.filtered_lateral_error = (
+            self.error_filter_alpha_y * lateral_error
+            + (1.0 - self.error_filter_alpha_y) * self.filtered_lateral_error
+        )
+        heading_delta = wrap_angle(heading_error - self.filtered_heading_error)
+        self.filtered_heading_error = wrap_angle(
+            self.filtered_heading_error + self.error_filter_alpha_psi * heading_delta
+        )
+        return self.filtered_lateral_error, self.filtered_heading_error
+
+    def _preview_curvature(self, sample: ReferenceSample) -> float:
+        """返回从当前投影点向前 lookahead 距离内的最大绝对曲率。"""
+        if (
+            self.curvature_speed_lookahead_m <= 0.0
+            or self.points is None
+            or self.curvatures is None
+            or self.segment_lengths is None
+        ):
+            return abs(sample.curvature)
+
+        max_curvature = abs(sample.curvature)
+        distance_left = self.curvature_speed_lookahead_m
+        segment_idx = sample.segment_idx
+        segment_t = float(np.clip(sample.segment_t, 0.0, 1.0))
+
+        while distance_left > 0.0:
+            if self.path_closed_loop:
+                segment_length = float(self.segment_lengths[segment_idx])
+                next_idx = (segment_idx + 1) % len(self.curvatures)
+            else:
+                if segment_idx >= len(self.segment_lengths):
+                    break
+                segment_length = float(self.segment_lengths[segment_idx])
+                next_idx = min(segment_idx + 1, len(self.curvatures) - 1)
+
+            remaining_segment = max(0.0, (1.0 - segment_t) * segment_length)
+            max_curvature = max(max_curvature, abs(float(self.curvatures[next_idx])))
+            distance_left -= remaining_segment
+
+            if remaining_segment <= 1e-9 and segment_t <= 0.0:
+                break
+            if not self.path_closed_loop and next_idx >= len(self.curvatures) - 1:
+                break
+
+            segment_idx = next_idx
+            segment_t = 0.0
+
+        return max_curvature
+
     def _compute_speed_command(self, delta_cmd: float, curvature_ref: float) -> float:
         """根据转向指令和参考曲率计算安全速度。"""
         if self.enable_curvature_speed_limit:
@@ -490,6 +606,28 @@ class LqrController(Node):
                 self.wheelbase, self.max_lateral_accel, self.min_speed,
             )
         return self.target_speed
+
+    def _apply_steering_rate_limit(self, delta_cmd: float, dt: float) -> tuple[float, bool]:
+        """限制相邻控制周期之间的转角命令变化率。"""
+        if (
+            not self.enable_steering_rate_limit
+            or self.max_steering_rate <= 0.0
+            or dt <= 0.0
+        ):
+            self.previous_delta_cmd = delta_cmd
+            return delta_cmd, False
+
+        max_delta_step = self.max_steering_rate * dt
+        delta_step = float(
+            np.clip(
+                delta_cmd - self.previous_delta_cmd,
+                -max_delta_step,
+                max_delta_step,
+            )
+        )
+        limited_delta = self.previous_delta_cmd + delta_step
+        self.previous_delta_cmd = limited_delta
+        return limited_delta, abs(limited_delta - delta_cmd) > 1e-9
 
     def _apply_speed_ramp(self, desired_speed: float, stamp_sec: float) -> float:
         """对速度指令施加加减速斜坡限幅，避免起步阶跃。
@@ -535,7 +673,14 @@ class LqrController(Node):
         v_cmd: float,
         lateral_error: float,
         heading_error: float,
+        control_lateral_error: float,
+        control_heading_error: float,
+        filtered_lateral_error: float,
+        filtered_heading_error: float,
         sample: ReferenceSample,
+        curvature_preview: float,
+        delta_raw: float,
+        delta_rate_limited: bool,
         delta_feedback: float,
         delta_feedforward: float,
         delta_cmd: float,
@@ -556,7 +701,14 @@ class LqrController(Node):
                 f"{v_cmd:.6f}",
                 f"{lateral_error:.6f}",
                 f"{heading_error:.6f}",
+                f"{control_lateral_error:.6f}",
+                f"{control_heading_error:.6f}",
+                f"{filtered_lateral_error:.6f}",
+                f"{filtered_heading_error:.6f}",
                 f"{sample.curvature:.6f}",
+                f"{curvature_preview:.6f}",
+                f"{delta_raw:.6f}",
+                int(delta_rate_limited),
                 f"{delta_feedback:.6f}",
                 f"{delta_feedforward:.6f}",
                 f"{delta_cmd:.6f}",
@@ -635,8 +787,12 @@ class LqrController(Node):
         truth_sample = self._sample_reference(position)
 
         normal = np.array([-math.sin(sample.heading), math.cos(sample.heading)])
-        lateral_error = float((control_position - sample.point) @ normal)
-        heading_error = wrap_angle(control_yaw - sample.heading)
+        raw_lateral_error = float((control_position - sample.point) @ normal)
+        raw_heading_error = wrap_angle(control_yaw - sample.heading)
+        lateral_error, heading_error = self._filter_control_errors(
+            raw_lateral_error,
+            raw_heading_error,
+        )
         truth_normal = np.array([-math.sin(truth_sample.heading), math.cos(truth_sample.heading)])
         truth_lateral_error = float((position - truth_sample.point) @ truth_normal)
         truth_heading_error = wrap_angle(yaw - truth_sample.heading)
@@ -647,8 +803,9 @@ class LqrController(Node):
             if 1e-4 <= measured_dt <= 0.5:
                 dt = measured_dt
 
+        lqr_model_speed = max(v_actual, self.current_speed_cmd, self.lqr_min_model_speed)
         if self.gain_table is not None:
-            interp = self.gain_table.interpolate(max(v_actual, self.target_speed))
+            interp = self.gain_table.interpolate(lqr_model_speed)
             q_lat = interp.q_lateral
             q_head = interp.q_heading
             r_steer = interp.r_steering
@@ -663,7 +820,7 @@ class LqrController(Node):
             lateral_error=lateral_error,
             heading_error=heading_error,
             curvature_ref=sample.curvature,
-            speed=max(v_actual, self.target_speed),
+            speed=lqr_model_speed,
             wheelbase=self.wheelbase,
             dt=dt,
             min_model_speed=self.lqr_min_model_speed,
@@ -675,7 +832,9 @@ class LqrController(Node):
         delta_cmd = float(
             np.clip(delta_raw, -self.max_steering_angle, self.max_steering_angle)
         )
-        desired_speed = self._compute_speed_command(delta_cmd, sample.curvature)
+        delta_cmd, delta_rate_limited = self._apply_steering_rate_limit(delta_cmd, dt)
+        curvature_preview = self._preview_curvature(sample)
+        desired_speed = self._compute_speed_command(delta_cmd, curvature_preview)
         v_cmd = self._apply_speed_ramp(desired_speed, stamp_sec)
 
         if self._open_loop_finished(position):
@@ -685,6 +844,7 @@ class LqrController(Node):
             delta_cmd = 0.0
             v_cmd = 0.0
             self.current_speed_cmd = 0.0
+            self.previous_delta_cmd = 0.0
 
         self._publish_drive(stamp, delta_cmd, v_cmd)
         self._append_tracked_pose(position, yaw, stamp)
@@ -697,7 +857,14 @@ class LqrController(Node):
             v_cmd=v_cmd,
             lateral_error=truth_lateral_error,
             heading_error=truth_heading_error,
+            control_lateral_error=raw_lateral_error,
+            control_heading_error=raw_heading_error,
+            filtered_lateral_error=lateral_error,
+            filtered_heading_error=heading_error,
             sample=truth_sample,
+            curvature_preview=curvature_preview,
+            delta_raw=delta_raw,
+            delta_rate_limited=delta_rate_limited,
             delta_feedback=delta_feedback,
             delta_feedforward=delta_feedforward,
             delta_cmd=delta_cmd,

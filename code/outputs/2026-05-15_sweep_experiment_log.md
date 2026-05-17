@@ -1260,3 +1260,1020 @@ delta_limited = delta_prev + clamp(delta_raw - delta_prev,
 - `3.0m/s` 若仍不安全，则将实车上限暂定为 `2.0~2.5m/s`。
 
 clean 通过后再做 `light` noisy 压力测试。noisy 结果只作为鲁棒性参考，不直接用于决定是否上实车高速。
+
+### 2026-05-17 第二阶段实现记录：预瞄限速与转角速率限制
+
+已在 `stage/speed-planning-steering-rate` worktree 开始实现第二阶段功能，目标是降低原地图
+`3.0m/s` 下过大的 `delta_cmd` 高频变化和转角饱和风险。
+
+本次代码改动：
+
+- `pnc_rc/lqr/controller.py`
+  - 新增 `curvature_speed_lookahead_m`，默认 `1.0m`；
+  - 新增路径段长度缓存 `segment_lengths`；
+  - 每个控制周期从当前投影点沿路径向前扫描 `1.0m`，取窗口内最大绝对曲率作为
+    `curvature_preview`；
+  - 曲率限速从原来的当前点曲率改为预瞄曲率：
+    `v_curve=sqrt(max_lateral_accel / max(curvature_preview, eps))`；
+  - 新增 `enable_steering_rate_limit` 和 `max_steering_rate`，默认启用，
+    初始值 `2.0rad/s`；
+  - 转角命令先由 LQR 计算并按 `max_steering_angle` 裁剪，再按每周期最大变化量
+    `max_steering_rate * dt` 进行限幅；
+  - 日志新增 `curvature_preview`、`delta_raw`、`delta_rate_limited` 三列，用于区分
+    LQR 原始转角、最终执行转角以及是否被速率限制命中。
+
+- `launch/pnc_sim_launch.py`
+  - 新增 launch 参数：`curvature_speed_lookahead_m`、`enable_steering_rate_limit`、
+    `max_steering_rate`；
+  - ROS validate 可以直接通过命令行切换预瞄距离和转角速率限制。
+
+- `lqr_sweep/validate_ros.py`
+  - batch/single 验证支持 `--curvature-speed-lookahead-m`、
+    `--disable-steering-rate-limit`、`--max-steering-rate`；
+  - manifest 会记录预瞄距离、是否开启转角速率限制、最大转角速率；
+  - launch 输出中打印速度处理和转角处理配置，方便回看实验条件。
+
+第一轮建议测试：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --max-steering-rate 2.0 \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_rate2p0_clean_100s
+```
+
+验收重点：
+
+- `3.0m/s` 的 `delta_rate p95/max` 和 `steering_rate_rms` 应明显下降；
+- `delta_cmd` 不应长时间贴着 `±0.36rad`；
+- `p95_abs_e_y` 和 `max_abs_e_y` 不能明显恶化；
+- 如果出现转不过弯，先降低 `max_lateral_accel` 到 `3.0~3.2` 或将预瞄距离增大到
+  `1.5m`，再考虑把 `max_steering_rate` 放宽到 `3.0rad/s`。
+
+### 2026-05-17 Stage2 第一轮 clean 验证结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_preview1p0_rate2p0_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`1.5, 2.0, 2.5, 3.0m/s`
+- 地图：原地图
+- lookup table：`outputs/sweep_stadium/lqr_gain_table.yaml`
+- 曲率限速：开启
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- 转角速率限制：开启，`max_steering_rate=2.0rad/s`
+- 噪声：clean，无额外位姿噪声和延迟
+- RViz：关闭，自动日志和评估
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rms | steering_rate_rms |
+|------:|---------:|--------:|--------:|-----------:|----------:|-------------:|------------------:|
+| 1.5 | 0.50 cm | 1.08 cm | 1.56 cm | 3.31 deg | 7.02 deg | 9.81 deg | 87.7 deg/s |
+| 2.0 | 0.72 cm | 1.62 cm | 3.20 cm | 2.64 deg | 5.99 deg | 10.17 deg | 99.5 deg/s |
+| 2.5 | 1.60 cm | 3.59 cm | 4.34 cm | 2.52 deg | 6.12 deg | 10.69 deg | 101.1 deg/s |
+| 3.0 | 2.92 cm | 5.79 cm | 7.16 cm | 2.52 deg | 6.25 deg | 10.74 deg | 104.6 deg/s |
+
+3.0m/s 详细观察：
+
+- `curvature_preview` 正常工作，预瞄曲率 `p95≈0.91 1/m`；
+- `v_cmd` 被限速到约 `1.75~2.99m/s`，平均约 `2.23m/s`；
+- `v_actual` 平均约 `2.18m/s`，能跟随速度命令变化；
+- `delta_raw` 的 `p95_abs≈0.386rad`，仍经常超过物理转角上限；
+- `delta_cmd` 仍会触碰 `±0.36rad`，饱和比例约 `5.7%`；
+- `delta_rate_limited` 命中比例约 `20.8%`，说明转角速率限制经常介入；
+- 但 `steering_rate_rms≈104.6deg/s`，比第一阶段 3.0m/s 的约 `49.9deg/s` 更差。
+
+结论：
+
+1. 预瞄限速已经生效，车辆在高曲率区域会提前降到约 `1.75~2.0m/s`。
+2. 当前 `max_steering_rate=2.0rad/s` 的硬限幅没有让转角更平滑，反而让 `delta_cmd`
+   频繁以最大允许斜率追赶 `delta_raw`，形成连续斜坡/锯齿波形。
+3. 3.0m/s 横向误差仍可接受但比第一阶段变差，且转角饱和和转角变化率仍不适合直接上实车。
+4. 这一轮不能认为 Stage2 已经通过，高速实车上限仍建议暂定 `2.0~2.5m/s`。
+
+下一步建议：
+
+1. 跑一组 `--disable-steering-rate-limit`，保持 `lookahead=1.0m` 和
+   `max_lateral_accel=3.5` 不变，用来分离“预瞄限速”和“转角速率限制”的影响。
+2. 跑一组更保守速度规划：`max_lateral_accel=3.0`，必要时再试 `2.5`；
+   目标是降低 `delta_raw` 本身，而不是靠 rate limit 硬拦。
+3. 若仍需要限制转角变化，应把单纯 slew-rate limiter 改成更温和的转向一阶低通/执行器模型，
+   或先对 `delta_raw` 做滤波再限幅，避免当前这种持续顶着最大斜率追踪的锯齿行为。
+4. 后续评价中需要额外输出 `delta_rate p95/max` 和 steering saturation ratio，当前 summary
+   只保留 `steering_rate_rms`，不够直观。
+
+### 2026-05-17 Stage2 评估脚本补强与下一轮测试
+
+根据第一轮 clean 验证，先补强评估工具，再继续做控制参数对照。原因是第一轮 summary 中
+`speed_rms_error`、`steering_saturation_ratio` 为空，且没有直接输出 `delta_rate p95/max`，
+导致只能手动解析 tracking CSV。
+
+本次改动：
+
+- `tracker_evaluate.py`
+  - LQR 日志中的 `v_cmd` 会自动映射为评估用 `v_ref`，因此下一轮 summary 会正常输出
+    `mean_abs_speed_error_mps` 和 `speed_rms_error_mps`；
+  - LQR 日志中的 `yaw` 会映射为 `yaw_vehicle`，便于 yaw-rate 统计；
+  - 新增 `--steering-limit-rad`，当日志没有 `steering_limit` 列时用该值计算转角饱和比例；
+  - summary 新增 `steering_rate_p95_deg_s`、`steering_rate_max_deg_s`、
+    `p95_abs_delta_cmd_deg`、`max_abs_delta_cmd_deg`；
+  - summary 新增 `delta_rate_limited_count` 和 `delta_rate_limited_ratio`；
+  - terminal recommendation 中也显示 `steering_rate_p95`、`steering_sat_ratio` 和
+    `delta_rate_limited_ratio`。
+
+- `validate_ros.py`
+  - 自动调用 `tracker_evaluate.py --steering-limit-rad <max_steering_angle>`，
+    因此后续 ROS batch 评估会自动带出饱和比例。
+
+下一轮对照测试顺序：
+
+1. 保持 `lookahead=1.0m`、`max_lateral_accel=3.5`，关闭 steering rate limit：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_clean_100s
+```
+
+2. 若关掉 rate limit 后 `steering_rate` 更好，则进一步降低速度规划横向加速度上限：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_alat3p0_clean_100s
+```
+
+判断标准：
+
+- 如果 `steering_rate_p95/max` 和 `steering_saturation_ratio` 明显下降，同时
+  `p95_abs_e_y` 不明显变差，则说明应该优先靠速度规划降低转角需求；
+- 如果关掉 rate limit 后转角也很糟，说明根因主要是轨迹/QR/速度上限本身太激进；
+- 只有当速度规划已足够保守但转角仍有高频抖动时，再考虑把硬 slew-rate limiter 改成
+  一阶转向执行器模型或低通滤波器。
+
+### 2026-05-17 Stage2 no-rate-limit 对照验证结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_preview1p0_no_rate_limit_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`1.5, 2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- 噪声：clean
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rms | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|-------------:|------------------:|------------------:|----------:|----------:|
+| 1.5 | 1.44 cm | 2.39 cm | 2.66 cm | 3.31 deg | 6.21 deg | 9.94 deg | 18.2 deg/s | 40.2 deg/s | 17.45 deg | 0.0% |
+| 2.0 | 0.84 cm | 2.04 cm | 2.49 cm | 2.60 deg | 4.89 deg | 10.24 deg | 25.6 deg/s | 57.7 deg/s | 18.44 deg | 0.0% |
+| 2.5 | 2.17 cm | 4.32 cm | 4.99 cm | 2.41 deg | 4.37 deg | 10.68 deg | 33.6 deg/s | 79.0 deg/s | 19.39 deg | 0.0% |
+| 3.0 | 3.45 cm | 6.59 cm | 7.21 cm | 2.35 deg | 4.33 deg | 10.77 deg | 39.9 deg/s | 97.1 deg/s | 19.60 deg | 0.0% |
+
+和上一轮 `max_steering_rate=2.0rad/s` 硬限幅对比：
+
+- 3.0m/s 的 `steering_rate_rms` 从约 `104.6deg/s` 降到 `39.9deg/s`；
+- 3.0m/s 的 steering saturation ratio 从约 `5.7%` 降到 `0.0%`；
+- 3.0m/s 的航向误差改善：`p95 e_psi` 从约 `6.25deg` 降到 `4.33deg`；
+- 但 3.0m/s 横向误差变差：`p95 e_y` 从约 `5.79cm` 上升到 `6.59cm`，
+  `max e_y` 仍约 `7.2cm`；
+- 2.5m/s 基本可接受但已接近边界：`max e_y=4.99cm`。
+
+结论：
+
+1. 硬 steering rate limiter 是上一轮锯齿和高 `steering_rate_rms` 的主要来源；
+2. 当前阶段不建议继续使用简单 slew-rate limiter；
+3. 关闭 rate limit 后转角波形明显健康，且没有转角饱和，但 3.0m/s 横向误差仍偏大；
+4. `2.5m/s` 可以作为目前较稳的上限候选，`3.0m/s` 还不能直接上实车；
+5. 下一步应优先调速度规划，而不是调 Q/R 或继续加硬转角限幅。
+
+下一步执行：
+
+- 先跑 `max_lateral_accel=3.0`、rate limit 关闭；
+- 如果 3.0m/s 的 `p95 e_y/max e_y` 仍不满足，再跑 `max_lateral_accel=2.5`；
+- 目标是让 3.0m/s 在不触发转角饱和的前提下，把 `p95 e_y` 压回 5cm 左右；
+- 如果速度规划压低后仍不够，再考虑增大曲率预瞄距离到 `1.5m`。
+
+### 2026-05-17 Stage2 `max_lateral_accel=3.0` 验证结果与速度一致性修复
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_preview1p0_no_rate_limit_alat3p0_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.0m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- 噪声：clean
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 1.03 cm | 2.08 cm | 2.56 cm | 2.76 deg | 5.17 deg | 25.0 deg/s | 56.7 deg/s | 17.95 deg | 0.0% |
+| 2.5 | 2.68 cm | 5.07 cm | 5.65 cm | 2.66 deg | 4.75 deg | 29.9 deg/s | 71.2 deg/s | 18.50 deg | 0.0% |
+| 3.0 | 4.00 cm | 7.30 cm | 7.96 cm | 2.64 deg | 4.74 deg | 35.8 deg/s | 84.2 deg/s | 19.28 deg | 0.0% |
+
+与 `max_lateral_accel=3.5`、rate limit 关闭对比：
+
+- 3.0m/s 平均速度降低：`v_actual mean≈2.25 -> 2.11m/s`；
+- 3.0m/s steering rate 略降：`steering_rate_rms≈39.9 -> 35.8deg/s`；
+- 但横向误差变差：`p95 e_y≈6.59 -> 7.30cm`，`max e_y≈7.21 -> 7.96cm`；
+- `delta_raw/delta_cmd` 幅值几乎没有改善，`p95_abs_delta_cmd≈17deg`。
+
+分析：
+
+单纯降低 `max_lateral_accel` 没有改善跟踪，说明问题不只是“速度太快”。检查控制器发现：
+在线曲率限速降低了 `v_cmd/v_actual`，但 LQR 内部仍使用
+`max(v_actual, target_speed)` 做模型速度和 gain table 插值。也就是说目标速度为 `3.0m/s`
+时，即使弯道里实际只跑约 `2.1m/s`，LQR 仍按 `3.0m/s` 的模型和表参数计算。
+
+这会导致速度规划和 LQR 控制不一致：
+
+- 速度规划认为车已降速；
+- LQR 仍按高速模型求反馈增益；
+- 降低 `max_lateral_accel` 后，车辆更慢，但控制器参数没有同步到低速段；
+- 因此横向误差没有变好，反而可能因为相位/模型不匹配变差。
+
+代码修复：
+
+- `controller.py` 中新增本周期 LQR 模型速度：
+
+```text
+lqr_model_speed = max(v_actual, current_speed_cmd, lqr_min_model_speed)
+```
+
+- gain table 插值从原来的 `max(v_actual, target_speed)` 改为 `lqr_model_speed`；
+- `compute_lqr_steering()` 的 `speed` 也改为 `lqr_model_speed`；
+- 这样当 3.0m/s 目标速度因曲率限速降到约 2.0m/s 时，LQR 会按约 2.0m/s 的模型和表参数计算。
+
+下一步需要重新验证：
+
+1. 重新跑 `max_lateral_accel=3.5`、rate limit 关闭，确认速度一致性修复后的基线；
+2. 再跑 `max_lateral_accel=3.0`，看保守速度规划是否开始真正改善误差；
+3. 若仍不够，再测试 `lookahead=1.5m`，而不是恢复硬 steering rate limit。
+
+### 2026-05-17 Stage2 速度一致性修复后 clean 基线
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_speed_consistent_preview1p0_no_rate_limit_alat3p5_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- LQR lookup table：按 `max(v_actual, current_speed_cmd, lqr_min_model_speed)` 在线插值
+- 噪声：clean
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 0.84 cm | 1.98 cm | 2.58 cm | 2.60 deg | 4.91 deg | 26.1 deg/s | 58.6 deg/s | 18.26 deg | 0.0% |
+| 2.5 | 0.91 cm | 2.22 cm | 2.70 cm | 2.43 deg | 4.98 deg | 31.5 deg/s | 74.5 deg/s | 18.44 deg | 0.0% |
+| 3.0 | 0.89 cm | 2.13 cm | 2.62 cm | 2.37 deg | 4.97 deg | 33.9 deg/s | 80.8 deg/s | 18.36 deg | 0.0% |
+
+对比旧 no-rate-limit 但按 `target_speed` 插表的 3.0m/s 结果：
+
+| 指标 | 旧逻辑 | 速度一致性修复后 |
+|------|-------:|----------------:|
+| mean e_y | 3.45 cm | 0.89 cm |
+| p95 e_y | 6.59 cm | 2.13 cm |
+| max e_y | 7.21 cm | 2.62 cm |
+| mean e_psi | 2.35 deg | 2.37 deg |
+| p95 e_psi | 4.33 deg | 4.97 deg |
+| steering_rate_rms | 39.9 deg/s | 33.9 deg/s |
+| steering_rate_p95 | 97.1 deg/s | 80.8 deg/s |
+| max delta | 19.60 deg | 18.36 deg |
+| sat ratio | 0.0% | 0.0% |
+
+结论：
+
+1. 速度一致性修复效果非常明显，3.0m/s 横向误差从不可接受区间降到较好水平；
+2. 原先 `max_lateral_accel=3.0` 变差的主要原因不是速度规划本身，而是 LQR 仍按
+   `target_speed=3.0m/s` 插表和建模；
+3. 当前 `max_lateral_accel=3.5`、`lookahead=1.0m`、rate limit 关闭是 Stage2 clean
+   验证中目前最好的组合；
+4. 3.0m/s clean 仿真已满足横向误差和转角饱和要求，但航向 p95 仍约 `5deg`，实车前仍需
+   noisy/light 验证；
+5. 简单硬 steering rate limiter 暂时不再使用。
+
+下一步：
+
+- 用同一套速度一致性修复代码跑 `max_lateral_accel=3.0` 对照，确认是否需要更保守速度；
+- 如果 `3.5` 已经优于 `3.0`，则保持 `3.5`，进入 light noise/latency 验证；
+- 实车策略仍建议从 `2.0~2.5m/s` 开始，确认定位和执行器正常后再逐步试 `3.0m/s`。
+
+### 2026-05-17 Stage2 light noise/latency 验证结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_speed_consistent_preview1p0_no_rate_limit_alat3p5_light_100s/noisy_light_pos2cm_yaw1deg_delay60ms
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- LQR lookup table：按在线速度插值
+- 噪声：`2cm` 位置噪声、`1deg` 航向噪声、`60ms` 位姿延迟
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 1.82 cm | 4.41 cm | 7.29 cm | 2.95 deg | 6.26 deg | 571.0 deg/s | 1137.6 deg/s | 20.63 deg | 1.0% |
+| 2.5 | 2.18 cm | 5.38 cm | 8.63 cm | 3.44 deg | 8.77 deg | 619.2 deg/s | 1258.5 deg/s | 20.63 deg | 4.3% |
+| 3.0 | 2.53 cm | 6.28 cm | 13.94 cm | 4.06 deg | 10.57 deg | 625.9 deg/s | 1281.8 deg/s | 20.63 deg | 7.5% |
+
+与 clean 3.0m/s 对比：
+
+| 指标 | clean | light noisy |
+|------|------:|------------:|
+| mean e_y | 0.89 cm | 2.53 cm |
+| p95 e_y | 2.13 cm | 6.28 cm |
+| max e_y | 2.62 cm | 13.94 cm |
+| mean e_psi | 2.37 deg | 4.06 deg |
+| p95 e_psi | 4.97 deg | 10.57 deg |
+| steering_rate_rms | 33.9 deg/s | 625.9 deg/s |
+| steering_rate_p95 | 80.8 deg/s | 1281.8 deg/s |
+| max delta | 18.36 deg | 20.63 deg |
+| sat ratio | 0.0% | 7.5% |
+
+分析：
+
+1. light 噪声/延迟下确实不稳定，主要表现为转角高频抖动和饱和；
+2. 速度规划本身仍在工作，3.0m/s 下 `v_actual mean≈2.15m/s`，但位姿噪声使
+   `delta_raw` 明显变大：clean `p95_abs(delta_raw)≈0.30rad`，light 下约 `0.39rad`，
+   最大达到约 `0.63rad`；
+3. `delta_cmd` 被 `±0.36rad` 限幅后仍出现极大的 steering rate，说明问题是控制输入噪声
+   直接进入 LQR 反馈，没有滤波/状态估计缓冲；
+4. 当前 light profile 同时叠加 `2cm` 位置噪声、`1deg` 航向噪声和 `60ms` 延迟，强度偏大，
+   需要拆分测试来源；
+5. 简单恢复硬 steering rate limiter 不合适，因为前面已验证它会制造斜坡/锯齿。更合理的是
+   先对控制用 pose/error 做低通/状态估计，或在真实系统依赖滤波后的里程计/定位结果。
+
+下一步建议：
+
+- 分别跑三组 ablation：`delay-only 60ms`、`position-only 2cm`、`heading-only 1deg`；
+- 如果主要是 heading noise，优先对 yaw/e_psi 做角度低通或使用更稳定的 yaw 来源；
+- 如果主要是 delay，降低实车上限速度或做延迟补偿/更长预瞄；
+- 如果主要是 position noise，对 `(x,y)` 或投影后的 `e_y` 做低通；
+- 在 controller 中增加可开关的控制位姿/误差低通滤波，再重新跑 light 验证。
+
+### 2026-05-17 Stage2 噪声来源拆分计划
+
+light profile 同时包含 `2cm` 位置噪声、`1deg` 航向噪声和 `60ms` 位姿延迟。由于三者叠加后
+`steering_rate_rms` 和饱和比例明显恶化，下一步先做 ablation，不直接改 QR 或恢复硬 steering
+rate limit。
+
+统一基线参数：
+
+- lookup table：`outputs/sweep_stadium/lqr_gain_table.yaml`
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- LQR lookup table：按在线速度插值
+- 每组运行 `100s`
+
+#### A. delay-only 60ms
+
+目的：判断纯位姿延迟是否足以导致高频转角和误差放大。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --pose-delay-ms 60 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_delay60ms_alat3p5_clean_100s
+```
+
+#### B. position-only 2cm
+
+目的：判断横向位置噪声是否主要通过 `e_y` 反馈被 LQR 放大。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --position-noise-std 0.02 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_pos2cm_alat3p5_clean_100s
+```
+
+#### C. heading-only 1deg
+
+目的：判断航向噪声是否主要通过 `e_psi` 反馈造成转角高频抖动。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --heading-noise-std-deg 1.0 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_yaw1deg_alat3p5_clean_100s
+```
+
+判断方式：
+
+- 若 delay-only 明显恶化：滤波不能根治，优先降低速度、增加预瞄或做延迟补偿；
+- 若 position-only 明显恶化：优先滤波 `(x,y)` 或投影后的 `e_y`；
+- 若 heading-only 明显恶化：优先滤波 yaw 或 `e_psi`，并检查真实系统 yaw 来源；
+- 若单项都不严重但 light 叠加后严重：说明扰动存在耦合，先做轻量误差低通，再逐步叠加验证。
+
+### 2026-05-17 Stage2 heading-only 1deg ablation 结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_ablation_yaw1deg_alat3p5_clean_100s/noisy_clean_pos0cm_yaw1deg_delay0ms
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- steering rate limit：关闭
+- 位置噪声：`0cm`
+- 航向噪声：`1deg`
+- 位姿延迟：`0ms`
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 0.86 cm | 1.98 cm | 2.81 cm | 2.61 deg | 4.94 deg | 319.3 deg/s | 640.4 deg/s | 20.63 deg | 0.009% |
+| 2.5 | 0.96 cm | 2.23 cm | 3.04 cm | 2.48 deg | 4.98 deg | 414.4 deg/s | 836.1 deg/s | 20.63 deg | 0.005% |
+| 3.0 | 0.98 cm | 2.29 cm | 3.10 cm | 2.46 deg | 5.03 deg | 421.7 deg/s | 867.2 deg/s | 20.63 deg | 0.005% |
+
+与 clean 3.0m/s 对比：
+
+| 指标 | clean | heading-only |
+|------|------:|-------------:|
+| mean e_y | 0.89 cm | 0.98 cm |
+| p95 e_y | 2.13 cm | 2.29 cm |
+| max e_y | 2.62 cm | 3.10 cm |
+| mean e_psi | 2.37 deg | 2.46 deg |
+| p95 e_psi | 4.97 deg | 5.03 deg |
+| steering_rate_rms | 33.9 deg/s | 421.7 deg/s |
+| steering_rate_p95 | 80.8 deg/s | 867.2 deg/s |
+| max delta | 18.36 deg | 20.63 deg |
+| sat ratio | 0.0% | 0.005% |
+
+结论：
+
+1. `1deg` 航向噪声单独存在时，路径跟踪误差基本保持可接受；
+2. 但转角变化率显著恶化，3.0m/s 的 `steering_rate_rms` 从 `33.9deg/s` 增至
+   `421.7deg/s`，`p95` 从 `80.8deg/s` 增至 `867.2deg/s`；
+3. 说明 yaw / `e_psi` 噪声是转角高频抖动的重要来源；
+4. 由于 heading-only 下横向误差没有明显炸，light profile 中 `max e_y=13.94cm` 的大幅恶化
+   还需要 position-only 和 delay-only 结果来解释；
+5. 下一步应优先实现或测试 yaw/e_psi 低通滤波，但在决定滤波参数前仍需完成 position-only 和
+   delay-only 两组 ablation。
+
+初步工程判断：
+
+- 对航向反馈加轻量低通有必要；
+- 滤波对象优先考虑 `e_psi`，而不是直接滤 `delta_cmd`；
+- 不建议恢复硬 steering rate limiter，因为它会制造斜坡/锯齿；
+- 若 position/delay 也明显恶化，则需要同时对 `e_y` 和延迟做处理。
+
+### 2026-05-17 Stage2 position/delay/yaw ablation 总结
+
+三组 ablation 实际均已完成：
+
+- delay-only:
+  `code/outputs/evaluation_ros/stage2_ablation_delay60ms_alat3p5_clean_100s/noisy_clean_pos0cm_yaw0deg_delay60ms`
+- position-only:
+  `code/outputs/evaluation_ros/stage2_ablation_pos2cm_alat3p5_clean_100s/noisy_clean_pos2cm_yaw0deg_delay0ms`
+- heading-only:
+  `code/outputs/evaluation_ros/stage2_ablation_yaw1deg_alat3p5_clean_100s/noisy_clean_pos0cm_yaw1deg_delay0ms`
+
+#### 3.0m/s 对比表
+
+| case | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| clean | 0.89 cm | 2.13 cm | 2.62 cm | 2.37 deg | 4.97 deg | 33.9 deg/s | 80.8 deg/s | 18.36 deg | 0.0% |
+| yaw 1deg only | 0.98 cm | 2.29 cm | 3.10 cm | 2.46 deg | 5.03 deg | 421.7 deg/s | 867.2 deg/s | 20.63 deg | 0.005% |
+| pos 2cm only | 1.00 cm | 2.32 cm | 3.32 cm | 2.50 deg | 5.14 deg | 524.1 deg/s | 1047.6 deg/s | 20.63 deg | 0.31% |
+| delay 60ms only | 2.22 cm | 5.34 cm | 8.08 cm | 3.82 deg | 10.53 deg | 79.1 deg/s | 189.0 deg/s | 20.63 deg | 5.79% |
+| light all | 2.53 cm | 6.28 cm | 13.94 cm | 4.06 deg | 10.57 deg | 625.9 deg/s | 1281.8 deg/s | 20.63 deg | 7.51% |
+
+#### 结论
+
+1. `1deg` yaw noise 和 `2cm` position noise 单独存在时，横向误差基本仍然可接受，
+   但 steering rate 会严重恶化：
+   - yaw-only 3.0m/s: `steering_rate_rms≈421.7deg/s`
+   - pos-only 3.0m/s: `steering_rate_rms≈524.1deg/s`
+   因此测量噪声主要表现为转角高频抖动。
+
+2. `60ms` delay 单独存在时，steering rate 没有像噪声项那样爆炸，但轨迹误差明显恶化：
+   - `p95 e_y≈5.34cm`
+   - `max e_y≈8.08cm`
+   - `p95 e_psi≈10.53deg`
+   - steering saturation ratio≈`5.79%`
+   因此延迟主要损害闭环稳定裕度和跟踪误差。
+
+3. full light 是三者叠加后的耦合结果：
+   - 噪声项负责把 `delta_cmd` 打成高频；
+   - delay 负责让真实轨迹偏离更大；
+   - 组合后出现 `max e_y≈13.94cm` 和 `steering_rate_rms≈625.9deg/s`。
+
+4. 修复方向不能只靠单一手段：
+   - 对 yaw / `e_psi` 和 position / `e_y` 加轻量低通，用来压测量噪声；
+   - 对 delay，需要降低高速上限、增大预瞄或做延迟补偿；
+   - 不建议恢复硬 steering rate limiter，因为此前已验证它会制造锯齿/斜坡。
+
+#### 下一步工程计划
+
+先实现可开关的误差低通滤波：
+
+- `enable_error_filter`
+- `error_filter_alpha_y`
+- `error_filter_alpha_psi`
+
+建议初值：
+
+```text
+alpha_y = 0.25 ~ 0.35
+alpha_psi = 0.20 ~ 0.30
+```
+
+滤波对象优先选择已经投影后的 `e_y` 和 `e_psi`，而不是直接滤 `delta_cmd`。这样可以在进入
+LQR 反馈前抑制测量噪声，同时保留 LQR 的结构。
+
+完成滤波后验证顺序：
+
+1. yaw-only 和 pos-only，确认 steering rate 能否显著下降；
+2. full light，确认噪声叠加下是否仍可控；
+3. delay-only 若仍明显恶化，再单独测试 `lookahead=1.5m` 或降低 `max_lateral_accel`。
+
+### 2026-05-17 Stage2 误差低通滤波实现记录
+
+根据 noise ablation 的结论，本轮先不恢复硬 steering rate limiter，而是在 LQR 反馈前加入可开关的
+误差低通滤波：
+
+- `enable_error_filter`
+- `error_filter_alpha_y`
+- `error_filter_alpha_psi`
+
+实现位置：
+
+- `code/pnc_rc/lqr/controller.py`
+  - 对控制器看到的 `raw_lateral_error/raw_heading_error` 做一阶低通；
+  - 航向误差滤波使用 `wrap_angle` 处理角度跳变；
+  - LQR 使用滤波后的 `e_y/e_psi`；
+  - CSV 中真实评估误差仍写入原有 `e_y/e_psi`，避免评估结果被滤波后的控制误差“美化”；
+  - 新增日志字段：
+    - `control_e_y`
+    - `control_e_psi`
+    - `filtered_e_y`
+    - `filtered_e_psi`
+- `launch/pnc_sim_launch.py`
+  - 新增对应 launch 参数并传给 LQR 控制器；
+- `code/lqr_sweep/validate_ros.py`
+  - 新增命令行参数：
+    - `--enable-error-filter`
+    - `--error-filter-alpha-y`
+    - `--error-filter-alpha-psi`
+  - batch manifest 同步记录滤波开关和 alpha 参数。
+- `README.md`
+  - 增加 Stage2 滤波验证命令。
+
+建议先测试：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_filter_light_alphaY0p30_alphaPsi0p25_100s
+```
+
+预期：
+
+- yaw/position 噪声引起的 `steering_rate_rms` 和 `steering_rate_p95` 应明显下降；
+- 如果 full-light 下 `p95/max e_y` 仍偏大，主要问题就不再是测量噪声高频，而是
+  `60ms` 延迟导致的闭环相位滞后，需要单独用更保守速度规划、增大曲率预瞄或延迟补偿处理；
+- 若滤波后 clean/noise 跟踪误差变差明显，说明 alpha 过小，下一轮应试
+  `alpha_y=0.40`、`alpha_psi=0.35`。
+
+### 2026-05-17 Stage2 light noise + error filter 结果
+
+本轮测试路径：
+
+```text
+code/outputs/evaluation_ros/stage2_filter_light_alphaY0p30_alphaPsi0p25_100s/noisy_light_pos2cm_yaw1deg_delay60ms
+```
+
+配置：
+
+- `noise-profile = light`
+  - position noise: `2cm`
+  - yaw noise: `1deg`
+  - pose delay: `60ms`
+- `max_lateral_accel = 3.5m/s^2`
+- `curvature_speed_lookahead_m = 1.0m`
+- steering rate limiter: disabled
+- error filter enabled:
+  - `alpha_y = 0.30`
+  - `alpha_psi = 0.25`
+
+#### 结果摘要
+
+| speed | mean e_y | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------:|---------:|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| 2.0m/s | 1.76cm | 4.20cm | 6.57cm | 6.23deg | 131.9deg/s | 263.4deg/s | 0.35% | 90.8deg/s |
+| 2.5m/s | 2.33cm | 5.76cm | 12.24cm | 9.25deg | 142.8deg/s | 291.8deg/s | 5.67% | 102.3deg/s |
+| 3.0m/s | 2.54cm | 6.04cm | 12.18cm | 10.99deg | 150.1deg/s | 307.1deg/s | 7.93% | 106.1deg/s |
+
+#### 与未滤波 full-light 的 3.0m/s 对比
+
+| case | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| clean baseline | 2.13cm | 2.62cm | 4.97deg | 33.9deg/s | 80.8deg/s | 0.00% | 98.9deg/s |
+| light, no filter | 6.28cm | 13.94cm | 10.57deg | 625.9deg/s | 1281.8deg/s | 7.51% | 106.6deg/s |
+| light, error filter | 6.04cm | 12.18cm | 10.99deg | 150.1deg/s | 307.1deg/s | 7.93% | 106.1deg/s |
+
+#### 判断
+
+1. 误差低通滤波是有效的：3.0m/s 下 `steering_rate_rms` 从 `625.9deg/s`
+   降到 `150.1deg/s`，`steering_rate_p95` 从 `1281.8deg/s` 降到
+   `307.1deg/s`。
+
+2. 但滤波没有解决高阶稳定性问题：
+   - `p95 e_psi` 仍约 `11deg`；
+   - `steering_saturation_ratio` 仍约 `7.9%`；
+   - `max e_y` 仍超过 `12cm`；
+   - `yaw_rate_rms` 与未滤波 light 基本相同。
+
+3. 关于 yaw rate：
+   clean baseline 在 3.0m/s 下 `yaw_rate_rms` 也接近 `99deg/s`，说明赛道曲率和
+   速度规划本身已经要求较高车身转动速度。filtered light 的 `yaw_rate_rms≈106deg/s`
+   不是最主要的新增问题，真正危险的是：
+   - 噪声 + 延迟下航向误差变大；
+   - 转角接近饱和的时间比例较高；
+   - `steering_rate_p95≈307deg/s` 对实车仍然偏激进。
+
+4. 当前 3.0m/s noisy-light 不建议直接上实车。更合理的下一步不是继续单纯加滤波，而是让速度规划更保守：
+   - 先把 `max_lateral_accel` 从 `3.5` 降到 `3.0` 或 `2.5`；
+   - 或把曲率预瞄从 `1.0m` 增大到 `1.5m`；
+   - 目标是降低弯前速度、降低转角饱和比例和 `p95 e_psi`。
+
+下一轮建议测试：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 1.5 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_filter_light_preview1p5_alat3p0_alphaY0p30_alphaPsi0p25_100s
+```
+
+### 2026-05-17 Stage2 更保守速度规划 + light noise + error filter 结果
+
+本轮测试路径：
+
+```text
+code/outputs/evaluation_ros/stage2_filter_light_preview1p5_alat3p0_alphaY0p30_alphaPsi0p25_100s/noisy_light_pos2cm_yaw1deg_delay60ms
+```
+
+相对上一轮只改速度规划：
+
+- `max_lateral_accel: 3.5 -> 3.0m/s^2`
+- `curvature_speed_lookahead_m: 1.0 -> 1.5m`
+
+其他保持不变：
+
+- light noise: `2cm position + 1deg yaw + 60ms delay`
+- `alpha_y = 0.30`
+- `alpha_psi = 0.25`
+- steering rate limiter disabled
+
+#### 结果摘要
+
+| speed | mean e_y | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------:|---------:|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| 2.0m/s | 1.71cm | 4.16cm | 5.90cm | 6.19deg | 129.9deg/s | 258.5deg/s | 0.04% | 87.3deg/s |
+| 2.5m/s | 1.95cm | 4.55cm | 6.09cm | 6.86deg | 140.2deg/s | 281.2deg/s | 0.29% | 93.6deg/s |
+| 3.0m/s | 1.96cm | 4.64cm | 6.49cm | 7.16deg | 138.7deg/s | 278.2deg/s | 0.93% | 92.5deg/s |
+
+#### 3.0m/s 对比
+
+| case | mean e_y | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------|---------:|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| clean baseline, `alat=3.5`, `lookahead=1.0` | 0.89cm | 2.13cm | 2.62cm | 4.97deg | 33.9deg/s | 80.8deg/s | 0.00% | 98.9deg/s |
+| light + filter, `alat=3.5`, `lookahead=1.0` | 2.54cm | 6.04cm | 12.18cm | 10.99deg | 150.1deg/s | 307.1deg/s | 7.93% | 106.1deg/s |
+| light + filter, `alat=3.0`, `lookahead=1.5` | 1.96cm | 4.64cm | 6.49cm | 7.16deg | 138.7deg/s | 278.2deg/s | 0.93% | 92.5deg/s |
+
+#### 判断
+
+1. 更保守速度规划是有效的：
+   - `max e_y` 从 `12.18cm` 降到 `6.49cm`；
+   - `p95 e_psi` 从 `10.99deg` 降到 `7.16deg`；
+   - steering saturation ratio 从 `7.93%` 降到 `0.93%`；
+   - `yaw_rate_rms` 从 `106.1deg/s` 降到 `92.5deg/s`。
+
+2. 这说明 Stage2 noisy-light 下的主要问题不是 LQR 表本身，而是弯前速度规划不够保守。
+   `60ms` delay 会让车看到的位姿落后真实状态，如果速度规划还贴着曲率极限跑，就容易在入弯阶段
+   航向误差变大并触发转角饱和。
+
+3. 当前结果已经比上一轮接近实车可测状态，但 3.0m/s 仍需谨慎：
+   - `p95 e_y≈4.64cm` 可以接受；
+   - `max e_y≈6.49cm` 比较合理；
+   - `p95 e_psi≈7.16deg` 仍偏大；
+   - `steering_rate_p95≈278deg/s` 仍然比 clean baseline 高很多。
+
+#### 下一步建议
+
+保留这组速度规划作为 Stage2 当前推荐基线：
+
+```text
+max_lateral_accel = 3.0m/s^2
+curvature_speed_lookahead_m = 1.5m
+enable_error_filter = true
+alpha_y = 0.30
+alpha_psi = 0.25
+```
+
+下一轮不建议继续大幅降低 `max_lateral_accel`，否则速度会过于保守，影响阶段目标。更好的下一步是做
+小范围对比：
+
+1. `alpha_y=0.40, alpha_psi=0.35`：检查是否能进一步降低相位滞后和航向误差；
+2. `lookahead=2.0m, alat=3.0`：检查更早减速是否还能降低 `p95 e_psi`，但注意是否牺牲过多速度；
+3. 如果要上实车，先从 `target_speed=2.0m/s` 或 `2.5m/s` 开始，不建议直接用 noisy-light 下的
+   3.0m/s 作为首轮实车速度。
+
+### 2026-05-17 Stage2 filter alpha / lookahead 小范围对比
+
+本轮对比两组设置：
+
+1. 更快滤波：
+   - `lookahead = 1.5m`
+   - `max_lateral_accel = 3.0m/s^2`
+   - `alpha_y = 0.40`
+   - `alpha_psi = 0.35`
+2. 更远曲率预瞄：
+   - `lookahead = 2.0m`
+   - `max_lateral_accel = 3.0m/s^2`
+   - `alpha_y = 0.30`
+   - `alpha_psi = 0.25`
+
+对比基线是上一轮：
+
+```text
+lookahead = 1.5m
+max_lateral_accel = 3.0m/s^2
+alpha_y = 0.30
+alpha_psi = 0.25
+```
+
+#### 3.0m/s 对比
+
+| case | mean e_y | p95 e_y | max e_y | p95 e_psi | max e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------|---------:|--------:|--------:|----------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| baseline: `lh=1.5`, `alpha=0.30/0.25` | 1.96cm | 4.64cm | 6.49cm | 7.16deg | 11.38deg | 138.7deg/s | 278.2deg/s | 0.93% | 92.5deg/s |
+| faster filter: `lh=1.5`, `alpha=0.40/0.35` | 2.00cm | 4.55cm | 6.26cm | 7.30deg | 10.13deg | 188.7deg/s | 379.9deg/s | 0.57% | 93.4deg/s |
+| longer lookahead: `lh=2.0`, `alpha=0.30/0.25` | 1.84cm | 4.32cm | 6.17cm | 6.43deg | 8.15deg | 137.6deg/s | 274.2deg/s | 0.10% | 90.0deg/s |
+
+#### 全速度趋势
+
+- 更快滤波 `alpha=0.40/0.35`：
+  - 横向误差变化不大；
+  - `max e_psi` 在 3.0m/s 略好；
+  - 但 `steering_rate_rms/p95` 明显变差，例如 3.0m/s 从 `138.7/278.2deg/s`
+    增加到 `188.7/379.9deg/s`。
+  - 说明滤波太快后，高频噪声重新进入 LQR 反馈，不适合作为推荐基线。
+
+- 更远预瞄 `lookahead=2.0m`：
+  - 2.5m/s 和 3.0m/s 均更好；
+  - 3.0m/s 的 `p95 e_psi` 从 `7.16deg` 降到 `6.43deg`；
+  - 3.0m/s 的 saturation ratio 从 `0.93%` 降到 `0.10%`；
+  - `yaw_rate_rms` 也从 `92.5deg/s` 降到 `90.0deg/s`；
+  - `steering_rate` 没有恶化，基本略好。
+
+#### 当前推荐 Stage2 参数
+
+当前仿真压力测试下，推荐使用：
+
+```text
+max_lateral_accel = 3.0m/s^2
+curvature_speed_lookahead_m = 2.0m
+enable_error_filter = true
+error_filter_alpha_y = 0.30
+error_filter_alpha_psi = 0.25
+enable_steering_rate_limit = false
+```
+
+注意：这不是说模拟器中的 noise/light 参数等价于实车，而是说明在存在位姿噪声和延迟时，
+“更早看到弯并提前减速”比继续加快滤波更有效。
+
+#### 实车前建议
+
+1. 保持 `lookahead=2.0m, alat=3.0` 作为 Stage2 推荐基线；
+2. 实车第一轮不要直接跑 3.0m/s，建议先从 `2.0m/s` 或 `2.5m/s` 开始；
+3. 实车观察重点：
+   - 是否出现连续转角饱和；
+   - 是否出现肉眼可见蛇形；
+   - 入弯前是否减速过晚；
+   - PlotJuggler 中 `delta_cmd` 和 `v_cmd/v_actual` 是否平滑。
+
+### 2026-05-17 Stage2 推荐基线记录与 RViz 极限检查计划
+
+经过 clean、light noise、单项噪声、误差滤波、速度预瞄和滤波 alpha 对比后，当前 Stage2
+推荐基线固定为：
+
+```text
+max_lateral_accel = 3.0m/s^2
+curvature_speed_lookahead_m = 2.0m
+enable_error_filter = true
+error_filter_alpha_y = 0.30
+error_filter_alpha_psi = 0.25
+enable_steering_rate_limit = false
+```
+
+选择理由：
+
+- 相比 `lookahead=1.5m`，`lookahead=2.0m` 在 noisy-light 下进一步降低了 3.0m/s 的
+  `p95 e_psi`、`max e_psi`、steering saturation ratio 和 yaw rate；
+- 更快滤波 `alpha=0.40/0.35` 会让 `steering_rate` 明显变差，因此不作为当前基线；
+- 硬 steering rate limiter 已验证会制造斜坡/锯齿，因此继续关闭。
+
+下一步先做一次极限 RViz 肉眼检查，而不是继续盲目扫参数。测试条件为：
+
+- `target speed = 3.0m/s`
+- `noise-profile = light`
+- 推荐基线速度规划和误差滤波
+- RViz 开启
+
+命令：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode single \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 2.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/stage2_rviz_limit_baseline_v3p0_light
+```
+
+肉眼检查重点：
+
+1. 入弯前是否提前降速；
+2. `delta_cmd` 是否长时间贴近 `±0.36rad`；
+3. 是否有连续蛇形或左右摆动；
+4. 是否有明显贴墙、切弯过深或出弯外抛；
+5. PlotJuggler 中 `v_cmd/v_actual`、`delta_cmd`、`e_y/e_psi` 是否在弯道周期性恶化。
+
+后续决策：
+
+- 如果 RViz 3.0m/s 看起来稳定，再跑一次 clean/noise 推荐基线完整 batch，作为 Stage2 收尾验证；
+- 如果 3.0m/s 仍然肉眼紧张，Stage2 不继续追求仿真 3.0m/s，实车建议先以 `2.0~2.5m/s`
+  作为安全上限；
+- 下一阶段重点应转向实车前准备：实车低速验证流程、日志字段、急停/遥控接管、真实延迟和定位噪声测量。
