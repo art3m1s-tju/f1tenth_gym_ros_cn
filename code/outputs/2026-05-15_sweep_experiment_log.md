@@ -1687,3 +1687,99 @@ code/outputs/evaluation_ros/stage2_speed_consistent_preview1p0_no_rate_limit_ala
 - 如果主要是 delay，降低实车上限速度或做延迟补偿/更长预瞄；
 - 如果主要是 position noise，对 `(x,y)` 或投影后的 `e_y` 做低通；
 - 在 controller 中增加可开关的控制位姿/误差低通滤波，再重新跑 light 验证。
+
+### 2026-05-17 Stage2 噪声来源拆分计划
+
+light profile 同时包含 `2cm` 位置噪声、`1deg` 航向噪声和 `60ms` 位姿延迟。由于三者叠加后
+`steering_rate_rms` 和饱和比例明显恶化，下一步先做 ablation，不直接改 QR 或恢复硬 steering
+rate limit。
+
+统一基线参数：
+
+- lookup table：`outputs/sweep_stadium/lqr_gain_table.yaml`
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- LQR lookup table：按在线速度插值
+- 每组运行 `100s`
+
+#### A. delay-only 60ms
+
+目的：判断纯位姿延迟是否足以导致高频转角和误差放大。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --pose-delay-ms 60 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_delay60ms_alat3p5_clean_100s
+```
+
+#### B. position-only 2cm
+
+目的：判断横向位置噪声是否主要通过 `e_y` 反馈被 LQR 放大。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --position-noise-std 0.02 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_pos2cm_alat3p5_clean_100s
+```
+
+#### C. heading-only 1deg
+
+目的：判断航向噪声是否主要通过 `e_psi` 反馈造成转角高频抖动。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --heading-noise-std-deg 1.0 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_yaw1deg_alat3p5_clean_100s
+```
+
+判断方式：
+
+- 若 delay-only 明显恶化：滤波不能根治，优先降低速度、增加预瞄或做延迟补偿；
+- 若 position-only 明显恶化：优先滤波 `(x,y)` 或投影后的 `e_y`；
+- 若 heading-only 明显恶化：优先滤波 yaw 或 `e_psi`，并检查真实系统 yaw 来源；
+- 若单项都不严重但 light 叠加后严重：说明扰动存在耦合，先做轻量误差低通，再逐步叠加验证。

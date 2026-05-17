@@ -558,6 +558,78 @@ python3 -m lqr_sweep.validate_ros \
 `max_lateral_accel` 或把 `curvature-speed-lookahead-m` 从 `1.0` 增加到 `1.5`，最后再放宽
 `max-steering-rate`。
 
+如果 clean 通过但 `--noise-profile light` 明显恶化，不要直接调 QR，先拆分噪声来源。下面三组命令都使用
+速度一致性修复后的基线参数，并关闭 steering rate limit。
+
+delay-only：只测试 `60ms` 位姿延迟。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --pose-delay-ms 60 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_delay60ms_alat3p5_clean_100s
+```
+
+position-only：只测试 `2cm` 位置噪声。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --position-noise-std 0.02 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_pos2cm_alat3p5_clean_100s
+```
+
+heading-only：只测试 `1deg` 航向噪声。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --heading-noise-std-deg 1.0 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_ablation_yaw1deg_alat3p5_clean_100s
+```
+
+如果 delay-only 就明显变差，优先处理延迟补偿、降低高速上限或增大曲率预瞄；如果 position-only
+明显变差，优先滤波 `x/y` 或 `e_y`；如果 heading-only 明显变差，优先滤波 yaw 或 `e_psi`。
+
 #### 扫描时间估算
 
 | 模式 | 速度点数 | 网格规模 | 预计耗时 |
