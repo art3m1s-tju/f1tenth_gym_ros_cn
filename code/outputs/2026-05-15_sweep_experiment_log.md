@@ -1626,3 +1626,64 @@ code/outputs/evaluation_ros/stage2_speed_consistent_preview1p0_no_rate_limit_ala
 - 用同一套速度一致性修复代码跑 `max_lateral_accel=3.0` 对照，确认是否需要更保守速度；
 - 如果 `3.5` 已经优于 `3.0`，则保持 `3.5`，进入 light noise/latency 验证；
 - 实车策略仍建议从 `2.0~2.5m/s` 开始，确认定位和执行器正常后再逐步试 `3.0m/s`。
+
+### 2026-05-17 Stage2 light noise/latency 验证结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_speed_consistent_preview1p0_no_rate_limit_alat3p5_light_100s/noisy_light_pos2cm_yaw1deg_delay60ms
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- LQR lookup table：按在线速度插值
+- 噪声：`2cm` 位置噪声、`1deg` 航向噪声、`60ms` 位姿延迟
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 1.82 cm | 4.41 cm | 7.29 cm | 2.95 deg | 6.26 deg | 571.0 deg/s | 1137.6 deg/s | 20.63 deg | 1.0% |
+| 2.5 | 2.18 cm | 5.38 cm | 8.63 cm | 3.44 deg | 8.77 deg | 619.2 deg/s | 1258.5 deg/s | 20.63 deg | 4.3% |
+| 3.0 | 2.53 cm | 6.28 cm | 13.94 cm | 4.06 deg | 10.57 deg | 625.9 deg/s | 1281.8 deg/s | 20.63 deg | 7.5% |
+
+与 clean 3.0m/s 对比：
+
+| 指标 | clean | light noisy |
+|------|------:|------------:|
+| mean e_y | 0.89 cm | 2.53 cm |
+| p95 e_y | 2.13 cm | 6.28 cm |
+| max e_y | 2.62 cm | 13.94 cm |
+| mean e_psi | 2.37 deg | 4.06 deg |
+| p95 e_psi | 4.97 deg | 10.57 deg |
+| steering_rate_rms | 33.9 deg/s | 625.9 deg/s |
+| steering_rate_p95 | 80.8 deg/s | 1281.8 deg/s |
+| max delta | 18.36 deg | 20.63 deg |
+| sat ratio | 0.0% | 7.5% |
+
+分析：
+
+1. light 噪声/延迟下确实不稳定，主要表现为转角高频抖动和饱和；
+2. 速度规划本身仍在工作，3.0m/s 下 `v_actual mean≈2.15m/s`，但位姿噪声使
+   `delta_raw` 明显变大：clean `p95_abs(delta_raw)≈0.30rad`，light 下约 `0.39rad`，
+   最大达到约 `0.63rad`；
+3. `delta_cmd` 被 `±0.36rad` 限幅后仍出现极大的 steering rate，说明问题是控制输入噪声
+   直接进入 LQR 反馈，没有滤波/状态估计缓冲；
+4. 当前 light profile 同时叠加 `2cm` 位置噪声、`1deg` 航向噪声和 `60ms` 延迟，强度偏大，
+   需要拆分测试来源；
+5. 简单恢复硬 steering rate limiter 不合适，因为前面已验证它会制造斜坡/锯齿。更合理的是
+   先对控制用 pose/error 做低通/状态估计，或在真实系统依赖滤波后的里程计/定位结果。
+
+下一步建议：
+
+- 分别跑三组 ablation：`delay-only 60ms`、`position-only 2cm`、`heading-only 1deg`；
+- 如果主要是 heading noise，优先对 yaw/e_psi 做角度低通或使用更稳定的 yaw 来源；
+- 如果主要是 delay，降低实车上限速度或做延迟补偿/更长预瞄；
+- 如果主要是 position noise，对 `(x,y)` 或投影后的 `e_y` 做低通；
+- 在 controller 中增加可开关的控制位姿/误差低通滤波，再重新跑 light 验证。
