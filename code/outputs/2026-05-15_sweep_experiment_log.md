@@ -1153,3 +1153,110 @@ python3 -m lqr_sweep.run_sweep --mode full \
 3. 给 LQR 输出增加 steering rate limit，避免实车舵机收到过大的瞬时转角变化；
 4. 先在原地图 clean 验证，再做 light noisy 压力测试；
 5. 实车测试从 `0.5 -> 1.0 -> 1.5m/s` 递进，不直接上 `3.0m/s`。
+
+### 第二阶段实施计划：曲率预瞄限速与转角速率限制
+
+第二阶段先不继续修改 `Q/R`，重点解决 `3.0m/s` 下转向命令变化过激的问题。计划分三步实现：
+
+1. 前方曲率预瞄限速；
+2. 速度命令平滑；
+3. steering rate limit。
+
+#### 1.0m 曲率预瞄限速逻辑
+
+预瞄距离先固定为 `1.0m`。每个控制周期已经有车辆当前位置投影到参考路径的 `segment_idx` 和 `segment_t`，因此不需要重新找一个“单点 lookahead target”，而是从当前投影位置沿参考轨迹向前扫描一段弧长。
+
+具体逻辑：
+
+1. 从当前 `segment_idx` 开始；
+2. 累加后续轨迹段长度；
+3. 直到累计弧长达到 `1.0m`；
+4. 收集这段窗口内所有轨迹点或轨迹段的 `abs(curvature)`；
+5. 取窗口内最大值：
+
+```
+kappa_preview = max(abs(curvature[i]) for s_i in [0, 1.0m])
+```
+
+然后用横向加速度约束计算安全速度：
+
+```
+v_curve = sqrt(max_lateral_accel / max(kappa_preview, eps))
+v_target = clamp(v_curve, min_speed, target_speed)
+```
+
+如果路径是闭环，扫描到末尾后从开头继续；如果路径是开环，则扫描到终点停止。这样做的好处是车会在弯道前提前看到高曲率，而不是等当前位置曲率变大后才降速。
+
+初始参数建议：
+
+- `curvature_speed_lookahead_m = 1.0`
+- `max_lateral_accel = 3.5~4.0m/s^2`
+- `min_speed = 0.4m/s`
+
+验证时重点画 `curvature_ref`、`kappa_preview`、`v_cmd`、`delta_cmd`。理想现象是：进入急弯前 `kappa_preview` 先升高，`v_cmd` 提前下降，`delta_cmd` 峰值和变化率下降。
+
+#### 速度命令平滑：先用 ramp，不先上 PID
+
+当前问题不是“车辆实际速度跟不上速度命令”的闭环纵向控制问题，而是“速度命令本身是否提前、平滑”。因此第二阶段先保留当前 ramp：
+
+```
+v_cmd[k] = v_cmd[k-1] + clamp(v_desired - v_cmd[k-1],
+                             -max_decel * dt,
+                              max_accel * dt)
+```
+
+初始建议：
+
+- `max_accel = 1.0m/s^2`
+- `max_decel = 2.0~3.0m/s^2`
+
+暂时不引入 PID 的原因：
+
+- F1TENTH gym/ROS bridge 对 `AckermannDrive.speed` 已经有底层速度跟踪模型，外层再加 PID 可能和底层模型叠加；
+- 当前最需要调的是速度参考 profile，而不是电机闭环；
+- PID 需要真实速度反馈、积分限幅、抗饱和和低速死区处理，会引入新的调参维度。
+
+如果后续日志显示 `v_actual` 长期跟不上 `v_cmd`，例如 `speed_rms_error` 很大，才进入纵向 PID 或速度前馈/反馈控制。
+
+#### Steering rate limit 风险与应对
+
+转角速率限制形式：
+
+```
+delta_limited = delta_prev + clamp(delta_raw - delta_prev,
+                                  -max_steering_rate * dt,
+                                   max_steering_rate * dt)
+```
+
+初始建议：
+
+- `max_steering_rate = 2.0rad/s`
+- 如果跟踪明显变差，再试 `3.0rad/s`
+
+它确实等价于给转向执行增加低通/阻尼，风险是急弯入口可能“转不过来”，表现为：
+
+- `p95_abs_e_y` 或 `max_abs_e_y` 明显增大；
+- 弯道入口外侧偏差变大；
+- `delta_raw` 和 `delta_limited` 长时间差距很大；
+- steering saturation ratio 降低了，但横向误差上升。
+
+遇到这种情况的处理顺序：
+
+1. 先降低速度规划的 `max_lateral_accel`，让车更早更慢入弯；
+2. 增大曲率预瞄距离，例如从 `1.0m` 调到 `1.5m`；
+3. 将 `max_steering_rate` 从 `2.0rad/s` 放宽到 `3.0rad/s`；
+4. 如果仍然转不过来，再考虑局部调整高速段 `Q/R`。
+
+关键原则：实车安全优先。宁愿通过速度规划让车慢一点，也不要允许控制器用极大的转角变化率硬追轨迹。
+
+#### 第二阶段验收标准
+
+先在原地图 clean 验证 `1.5, 2.0, 2.5, 3.0m/s`：
+
+- `steering_rate_rms` 相比第一阶段明显下降；
+- `delta_rate p95` 明显下降；
+- `steering saturation ratio` 下降或保持较低；
+- `p95_abs_e_y` 不明显恶化；
+- `3.0m/s` 若仍不安全，则将实车上限暂定为 `2.0~2.5m/s`。
+
+clean 通过后再做 `light` noisy 压力测试。noisy 结果只作为鲁棒性参考，不直接用于决定是否上实车高速。
