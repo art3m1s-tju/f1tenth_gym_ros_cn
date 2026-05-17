@@ -2063,3 +2063,77 @@ python3 -m lqr_sweep.validate_ros \
   --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
   --batch-name stage2_filter_light_preview1p5_alat3p0_alphaY0p30_alphaPsi0p25_100s
 ```
+
+### 2026-05-17 Stage2 更保守速度规划 + light noise + error filter 结果
+
+本轮测试路径：
+
+```text
+code/outputs/evaluation_ros/stage2_filter_light_preview1p5_alat3p0_alphaY0p30_alphaPsi0p25_100s/noisy_light_pos2cm_yaw1deg_delay60ms
+```
+
+相对上一轮只改速度规划：
+
+- `max_lateral_accel: 3.5 -> 3.0m/s^2`
+- `curvature_speed_lookahead_m: 1.0 -> 1.5m`
+
+其他保持不变：
+
+- light noise: `2cm position + 1deg yaw + 60ms delay`
+- `alpha_y = 0.30`
+- `alpha_psi = 0.25`
+- steering rate limiter disabled
+
+#### 结果摘要
+
+| speed | mean e_y | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------:|---------:|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| 2.0m/s | 1.71cm | 4.16cm | 5.90cm | 6.19deg | 129.9deg/s | 258.5deg/s | 0.04% | 87.3deg/s |
+| 2.5m/s | 1.95cm | 4.55cm | 6.09cm | 6.86deg | 140.2deg/s | 281.2deg/s | 0.29% | 93.6deg/s |
+| 3.0m/s | 1.96cm | 4.64cm | 6.49cm | 7.16deg | 138.7deg/s | 278.2deg/s | 0.93% | 92.5deg/s |
+
+#### 3.0m/s 对比
+
+| case | mean e_y | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------|---------:|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| clean baseline, `alat=3.5`, `lookahead=1.0` | 0.89cm | 2.13cm | 2.62cm | 4.97deg | 33.9deg/s | 80.8deg/s | 0.00% | 98.9deg/s |
+| light + filter, `alat=3.5`, `lookahead=1.0` | 2.54cm | 6.04cm | 12.18cm | 10.99deg | 150.1deg/s | 307.1deg/s | 7.93% | 106.1deg/s |
+| light + filter, `alat=3.0`, `lookahead=1.5` | 1.96cm | 4.64cm | 6.49cm | 7.16deg | 138.7deg/s | 278.2deg/s | 0.93% | 92.5deg/s |
+
+#### 判断
+
+1. 更保守速度规划是有效的：
+   - `max e_y` 从 `12.18cm` 降到 `6.49cm`；
+   - `p95 e_psi` 从 `10.99deg` 降到 `7.16deg`；
+   - steering saturation ratio 从 `7.93%` 降到 `0.93%`；
+   - `yaw_rate_rms` 从 `106.1deg/s` 降到 `92.5deg/s`。
+
+2. 这说明 Stage2 noisy-light 下的主要问题不是 LQR 表本身，而是弯前速度规划不够保守。
+   `60ms` delay 会让车看到的位姿落后真实状态，如果速度规划还贴着曲率极限跑，就容易在入弯阶段
+   航向误差变大并触发转角饱和。
+
+3. 当前结果已经比上一轮接近实车可测状态，但 3.0m/s 仍需谨慎：
+   - `p95 e_y≈4.64cm` 可以接受；
+   - `max e_y≈6.49cm` 比较合理；
+   - `p95 e_psi≈7.16deg` 仍偏大；
+   - `steering_rate_p95≈278deg/s` 仍然比 clean baseline 高很多。
+
+#### 下一步建议
+
+保留这组速度规划作为 Stage2 当前推荐基线：
+
+```text
+max_lateral_accel = 3.0m/s^2
+curvature_speed_lookahead_m = 1.5m
+enable_error_filter = true
+alpha_y = 0.30
+alpha_psi = 0.25
+```
+
+下一轮不建议继续大幅降低 `max_lateral_accel`，否则速度会过于保守，影响阶段目标。更好的下一步是做
+小范围对比：
+
+1. `alpha_y=0.40, alpha_psi=0.35`：检查是否能进一步降低相位滞后和航向误差；
+2. `lookahead=2.0m, alat=3.0`：检查更早减速是否还能降低 `p95 e_psi`，但注意是否牺牲过多速度；
+3. 如果要上实车，先从 `target_speed=2.0m/s` 或 `2.5m/s` 开始，不建议直接用 noisy-light 下的
+   3.0m/s 作为首轮实车速度。
