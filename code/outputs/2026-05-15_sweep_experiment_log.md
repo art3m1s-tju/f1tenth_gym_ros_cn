@@ -1321,3 +1321,62 @@ python3 -m lqr_sweep.validate_ros \
 - `p95_abs_e_y` 和 `max_abs_e_y` 不能明显恶化；
 - 如果出现转不过弯，先降低 `max_lateral_accel` 到 `3.0~3.2` 或将预瞄距离增大到
   `1.5m`，再考虑把 `max_steering_rate` 放宽到 `3.0rad/s`。
+
+### 2026-05-17 Stage2 第一轮 clean 验证结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_preview1p0_rate2p0_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`1.5, 2.0, 2.5, 3.0m/s`
+- 地图：原地图
+- lookup table：`outputs/sweep_stadium/lqr_gain_table.yaml`
+- 曲率限速：开启
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- 转角速率限制：开启，`max_steering_rate=2.0rad/s`
+- 噪声：clean，无额外位姿噪声和延迟
+- RViz：关闭，自动日志和评估
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rms | steering_rate_rms |
+|------:|---------:|--------:|--------:|-----------:|----------:|-------------:|------------------:|
+| 1.5 | 0.50 cm | 1.08 cm | 1.56 cm | 3.31 deg | 7.02 deg | 9.81 deg | 87.7 deg/s |
+| 2.0 | 0.72 cm | 1.62 cm | 3.20 cm | 2.64 deg | 5.99 deg | 10.17 deg | 99.5 deg/s |
+| 2.5 | 1.60 cm | 3.59 cm | 4.34 cm | 2.52 deg | 6.12 deg | 10.69 deg | 101.1 deg/s |
+| 3.0 | 2.92 cm | 5.79 cm | 7.16 cm | 2.52 deg | 6.25 deg | 10.74 deg | 104.6 deg/s |
+
+3.0m/s 详细观察：
+
+- `curvature_preview` 正常工作，预瞄曲率 `p95≈0.91 1/m`；
+- `v_cmd` 被限速到约 `1.75~2.99m/s`，平均约 `2.23m/s`；
+- `v_actual` 平均约 `2.18m/s`，能跟随速度命令变化；
+- `delta_raw` 的 `p95_abs≈0.386rad`，仍经常超过物理转角上限；
+- `delta_cmd` 仍会触碰 `±0.36rad`，饱和比例约 `5.7%`；
+- `delta_rate_limited` 命中比例约 `20.8%`，说明转角速率限制经常介入；
+- 但 `steering_rate_rms≈104.6deg/s`，比第一阶段 3.0m/s 的约 `49.9deg/s` 更差。
+
+结论：
+
+1. 预瞄限速已经生效，车辆在高曲率区域会提前降到约 `1.75~2.0m/s`。
+2. 当前 `max_steering_rate=2.0rad/s` 的硬限幅没有让转角更平滑，反而让 `delta_cmd`
+   频繁以最大允许斜率追赶 `delta_raw`，形成连续斜坡/锯齿波形。
+3. 3.0m/s 横向误差仍可接受但比第一阶段变差，且转角饱和和转角变化率仍不适合直接上实车。
+4. 这一轮不能认为 Stage2 已经通过，高速实车上限仍建议暂定 `2.0~2.5m/s`。
+
+下一步建议：
+
+1. 跑一组 `--disable-steering-rate-limit`，保持 `lookahead=1.0m` 和
+   `max_lateral_accel=3.5` 不变，用来分离“预瞄限速”和“转角速率限制”的影响。
+2. 跑一组更保守速度规划：`max_lateral_accel=3.0`，必要时再试 `2.5`；
+   目标是降低 `delta_raw` 本身，而不是靠 rate limit 硬拦。
+3. 若仍需要限制转角变化，应把单纯 slew-rate limiter 改成更温和的转向一阶低通/执行器模型，
+   或先对 `delta_raw` 做滤波再限幅，避免当前这种持续顶着最大斜率追踪的锯齿行为。
+4. 后续评价中需要额外输出 `delta_rate p95/max` 和 steering saturation ratio，当前 summary
+   只保留 `steering_rate_rms`，不够直观。
