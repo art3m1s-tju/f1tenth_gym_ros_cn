@@ -2137,3 +2137,77 @@ alpha_psi = 0.25
 2. `lookahead=2.0m, alat=3.0`：检查更早减速是否还能降低 `p95 e_psi`，但注意是否牺牲过多速度；
 3. 如果要上实车，先从 `target_speed=2.0m/s` 或 `2.5m/s` 开始，不建议直接用 noisy-light 下的
    3.0m/s 作为首轮实车速度。
+
+### 2026-05-17 Stage2 filter alpha / lookahead 小范围对比
+
+本轮对比两组设置：
+
+1. 更快滤波：
+   - `lookahead = 1.5m`
+   - `max_lateral_accel = 3.0m/s^2`
+   - `alpha_y = 0.40`
+   - `alpha_psi = 0.35`
+2. 更远曲率预瞄：
+   - `lookahead = 2.0m`
+   - `max_lateral_accel = 3.0m/s^2`
+   - `alpha_y = 0.30`
+   - `alpha_psi = 0.25`
+
+对比基线是上一轮：
+
+```text
+lookahead = 1.5m
+max_lateral_accel = 3.0m/s^2
+alpha_y = 0.30
+alpha_psi = 0.25
+```
+
+#### 3.0m/s 对比
+
+| case | mean e_y | p95 e_y | max e_y | p95 e_psi | max e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------|---------:|--------:|--------:|----------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| baseline: `lh=1.5`, `alpha=0.30/0.25` | 1.96cm | 4.64cm | 6.49cm | 7.16deg | 11.38deg | 138.7deg/s | 278.2deg/s | 0.93% | 92.5deg/s |
+| faster filter: `lh=1.5`, `alpha=0.40/0.35` | 2.00cm | 4.55cm | 6.26cm | 7.30deg | 10.13deg | 188.7deg/s | 379.9deg/s | 0.57% | 93.4deg/s |
+| longer lookahead: `lh=2.0`, `alpha=0.30/0.25` | 1.84cm | 4.32cm | 6.17cm | 6.43deg | 8.15deg | 137.6deg/s | 274.2deg/s | 0.10% | 90.0deg/s |
+
+#### 全速度趋势
+
+- 更快滤波 `alpha=0.40/0.35`：
+  - 横向误差变化不大；
+  - `max e_psi` 在 3.0m/s 略好；
+  - 但 `steering_rate_rms/p95` 明显变差，例如 3.0m/s 从 `138.7/278.2deg/s`
+    增加到 `188.7/379.9deg/s`。
+  - 说明滤波太快后，高频噪声重新进入 LQR 反馈，不适合作为推荐基线。
+
+- 更远预瞄 `lookahead=2.0m`：
+  - 2.5m/s 和 3.0m/s 均更好；
+  - 3.0m/s 的 `p95 e_psi` 从 `7.16deg` 降到 `6.43deg`；
+  - 3.0m/s 的 saturation ratio 从 `0.93%` 降到 `0.10%`；
+  - `yaw_rate_rms` 也从 `92.5deg/s` 降到 `90.0deg/s`；
+  - `steering_rate` 没有恶化，基本略好。
+
+#### 当前推荐 Stage2 参数
+
+当前仿真压力测试下，推荐使用：
+
+```text
+max_lateral_accel = 3.0m/s^2
+curvature_speed_lookahead_m = 2.0m
+enable_error_filter = true
+error_filter_alpha_y = 0.30
+error_filter_alpha_psi = 0.25
+enable_steering_rate_limit = false
+```
+
+注意：这不是说模拟器中的 noise/light 参数等价于实车，而是说明在存在位姿噪声和延迟时，
+“更早看到弯并提前减速”比继续加快滤波更有效。
+
+#### 实车前建议
+
+1. 保持 `lookahead=2.0m, alat=3.0` 作为 Stage2 推荐基线；
+2. 实车第一轮不要直接跑 3.0m/s，建议先从 `2.0m/s` 或 `2.5m/s` 开始；
+3. 实车观察重点：
+   - 是否出现连续转角饱和；
+   - 是否出现肉眼可见蛇形；
+   - 入弯前是否减速过晚；
+   - PlotJuggler 中 `delta_cmd` 和 `v_cmd/v_actual` 是否平滑。
