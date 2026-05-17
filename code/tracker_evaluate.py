@@ -132,6 +132,15 @@ def parse_args() -> argparse.Namespace:
             "figure for the full unfiltered run."
         ),
     )
+    parser.add_argument(
+        "--steering-limit-rad",
+        type=float,
+        default=0.36,
+        help=(
+            "Fallback steering limit used to compute saturation ratio when the log "
+            "does not contain a steering_limit column. Default: 0.36 rad."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -154,15 +163,23 @@ def load_log(log_path: Path) -> pd.DataFrame:
 
     numeric_columns = [
         "time",
+        "x",
+        "y",
+        "yaw",
         "e_y",
         "e_psi",
         "abs_e_y",
         "abs_e_psi_deg",
+        "curvature_ref",
+        "curvature_preview",
         "lookahead_distance",
         "delta_pp",
         "delta_heading",
+        "delta_raw",
+        "delta_rate_limited",
         "delta_cmd",
         "v_actual",
+        "v_cmd",
         "v_ref",
         "yaw_vehicle",
         "compute_time_ms",
@@ -187,6 +204,11 @@ def load_log(log_path: Path) -> pd.DataFrame:
         dataframe["abs_e_psi_deg"] = np.abs(dataframe["e_psi_deg"].to_numpy(dtype=float))
     elif "abs_e_psi_deg" not in dataframe.columns:
         dataframe["abs_e_psi_deg"] = np.nan
+
+    if "v_ref" not in dataframe.columns and "v_cmd" in dataframe.columns:
+        dataframe["v_ref"] = dataframe["v_cmd"]
+    if "yaw_vehicle" not in dataframe.columns and "yaw" in dataframe.columns:
+        dataframe["yaw_vehicle"] = dataframe["yaw"]
 
     if "lookahead_distance" in dataframe.columns and dataframe["lookahead_distance"].notna().any():
         lookahead_distance = float(dataframe["lookahead_distance"].dropna().iloc[0])
@@ -646,12 +668,22 @@ def filter_straight_segments(
     return filtered
 
 
-def _compute_steering_metrics(dataframe: pd.DataFrame) -> dict[str, object]:
+def _compute_steering_metrics(
+    dataframe: pd.DataFrame,
+    fallback_steering_limit_rad: float | None,
+) -> dict[str, object]:
     """Compute steering smoothness metrics from the tracking log."""
     if "delta_cmd" not in dataframe.columns:
         return {
             "steering_rms_deg": None,
             "steering_rate_rms_deg_s": None,
+            "steering_rate_p95_deg_s": None,
+            "steering_rate_max_deg_s": None,
+            "mean_abs_delta_cmd_deg": None,
+            "p95_abs_delta_cmd_deg": None,
+            "max_abs_delta_cmd_deg": None,
+            "delta_rate_limited_count": None,
+            "delta_rate_limited_ratio": None,
             "steering_saturation_count": None,
             "steering_saturation_ratio": None,
         }
@@ -661,26 +693,62 @@ def _compute_steering_metrics(dataframe: pd.DataFrame) -> dict[str, object]:
         return {
             "steering_rms_deg": None,
             "steering_rate_rms_deg_s": None,
+            "steering_rate_p95_deg_s": None,
+            "steering_rate_max_deg_s": None,
+            "mean_abs_delta_cmd_deg": None,
+            "p95_abs_delta_cmd_deg": None,
+            "max_abs_delta_cmd_deg": None,
+            "delta_rate_limited_count": None,
+            "delta_rate_limited_ratio": None,
             "steering_saturation_count": None,
             "steering_saturation_ratio": None,
         }
 
     delta_cmd_rad = steering_df["delta_cmd"].to_numpy(dtype=float)
+    abs_delta_cmd_deg = np.abs(np.degrees(delta_cmd_rad))
     steering_rms_deg = _finite_rms(np.degrees(delta_cmd_rad))
+    mean_abs_delta_cmd_deg = _finite_mean(abs_delta_cmd_deg)
+    p95_abs_delta_cmd_deg = _finite_percentile(abs_delta_cmd_deg, P95_PERCENTILE)
+    max_abs_delta_cmd_deg = _finite_percentile(abs_delta_cmd_deg, 100.0)
 
     steering_rate_rms_deg_s = None
+    steering_rate_p95_deg_s = None
+    steering_rate_max_deg_s = None
     if len(steering_df) >= 2:
         time_rel_s = steering_df["time_rel_s"].to_numpy(dtype=float)
         dt = np.diff(time_rel_s)
         positive_dt_mask = dt > 0.0
         if np.any(positive_dt_mask):
             steering_rate_rad_s = np.diff(delta_cmd_rad)[positive_dt_mask] / dt[positive_dt_mask]
-            steering_rate_rms_deg_s = _finite_rms(np.degrees(steering_rate_rad_s))
+            abs_rate_deg_s = np.abs(np.degrees(steering_rate_rad_s))
+            steering_rate_rms_deg_s = _finite_rms(abs_rate_deg_s)
+            steering_rate_p95_deg_s = _finite_percentile(abs_rate_deg_s, P95_PERCENTILE)
+            steering_rate_max_deg_s = _finite_percentile(abs_rate_deg_s, 100.0)
+
+    delta_rate_limited_count = None
+    delta_rate_limited_ratio = None
+    if "delta_rate_limited" in steering_df.columns:
+        limited = pd.to_numeric(steering_df["delta_rate_limited"], errors="coerce").to_numpy(
+            dtype=float
+        )
+        finite_limited_mask = np.isfinite(limited)
+        if np.any(finite_limited_mask):
+            limited_mask = limited[finite_limited_mask] > 0.5
+            delta_rate_limited_count = int(np.count_nonzero(limited_mask))
+            delta_rate_limited_ratio = float(
+                delta_rate_limited_count / np.count_nonzero(finite_limited_mask)
+            )
 
     steering_saturation_count = None
     steering_saturation_ratio = None
     if "steering_limit" in steering_df.columns:
         steering_limit_rad = steering_df["steering_limit"].to_numpy(dtype=float)
+    elif fallback_steering_limit_rad is not None and fallback_steering_limit_rad > 0.0:
+        steering_limit_rad = np.full(len(steering_df), fallback_steering_limit_rad, dtype=float)
+    else:
+        steering_limit_rad = None
+
+    if steering_limit_rad is not None:
         valid_limit_mask = np.isfinite(delta_cmd_rad) & np.isfinite(steering_limit_rad)
         valid_limit_mask &= steering_limit_rad > 0.0
         if np.any(valid_limit_mask):
@@ -696,6 +764,13 @@ def _compute_steering_metrics(dataframe: pd.DataFrame) -> dict[str, object]:
     return {
         "steering_rms_deg": steering_rms_deg,
         "steering_rate_rms_deg_s": steering_rate_rms_deg_s,
+        "steering_rate_p95_deg_s": steering_rate_p95_deg_s,
+        "steering_rate_max_deg_s": steering_rate_max_deg_s,
+        "mean_abs_delta_cmd_deg": mean_abs_delta_cmd_deg,
+        "p95_abs_delta_cmd_deg": p95_abs_delta_cmd_deg,
+        "max_abs_delta_cmd_deg": max_abs_delta_cmd_deg,
+        "delta_rate_limited_count": delta_rate_limited_count,
+        "delta_rate_limited_ratio": delta_rate_limited_ratio,
         "steering_saturation_count": steering_saturation_count,
         "steering_saturation_ratio": steering_saturation_ratio,
     }
@@ -705,12 +780,13 @@ def summarize_log(
     dataframe: pd.DataFrame,
     lateral_threshold: float,
     heading_threshold_deg: float,
+    steering_limit_rad: float | None,
 ) -> dict[str, object]:
     """Return the key tuning metrics for one run."""
     abs_e_y = dataframe["abs_e_y"].to_numpy(dtype=float)
     abs_e_psi_deg = dataframe["abs_e_psi_deg"].to_numpy(dtype=float)
     finite_heading = abs_e_psi_deg[np.isfinite(abs_e_psi_deg)]
-    steering_metrics = _compute_steering_metrics(dataframe)
+    steering_metrics = _compute_steering_metrics(dataframe, steering_limit_rad)
     speed_metrics = _compute_speed_metrics(dataframe)
     timing_metrics = _compute_timing_metrics(dataframe)
     yaw_rate_metrics = _compute_yaw_rate_metrics(dataframe)
@@ -742,6 +818,13 @@ def summarize_log(
         "pass_max_heading_target": None,
         "steering_rms_deg": steering_metrics["steering_rms_deg"],
         "steering_rate_rms_deg_s": steering_metrics["steering_rate_rms_deg_s"],
+        "steering_rate_p95_deg_s": steering_metrics["steering_rate_p95_deg_s"],
+        "steering_rate_max_deg_s": steering_metrics["steering_rate_max_deg_s"],
+        "mean_abs_delta_cmd_deg": steering_metrics["mean_abs_delta_cmd_deg"],
+        "p95_abs_delta_cmd_deg": steering_metrics["p95_abs_delta_cmd_deg"],
+        "max_abs_delta_cmd_deg": steering_metrics["max_abs_delta_cmd_deg"],
+        "delta_rate_limited_count": steering_metrics["delta_rate_limited_count"],
+        "delta_rate_limited_ratio": steering_metrics["delta_rate_limited_ratio"],
         "steering_saturation_count": steering_metrics["steering_saturation_count"],
         "steering_saturation_ratio": steering_metrics["steering_saturation_ratio"],
         "mean_abs_speed_error_mps": speed_metrics["mean_abs_speed_error_mps"],
@@ -1424,11 +1507,30 @@ def build_recommendation(summary_df: pd.DataFrame) -> str:
             "lane_change_settling_time_s",
             "speed_rms_error_mps",
             "steering_rate_rms_deg_s",
+            "steering_rate_p95_deg_s",
+            "steering_saturation_ratio",
             "steering_rms_deg",
             "steering_saturation_count",
             "max_abs_e_y_m",
         ],
-        ascending=[False, False, False, True, True, True, True, True, True, True, True, True, True, True],
+        ascending=[
+            False,
+            False,
+            False,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+        ],
         kind="mergesort",
         na_position="last",
     )
@@ -1444,14 +1546,28 @@ def build_recommendation(summary_df: pd.DataFrame) -> str:
     max_heading_text = "-" if pd.isna(max_heading) else f"{max_heading:.2f} deg"
     steering_rms = best["steering_rms_deg"]
     steering_rate_rms = best["steering_rate_rms_deg_s"]
+    steering_rate_p95 = best.get("steering_rate_p95_deg_s")
     steering_sat = best["steering_saturation_count"]
+    steering_sat_ratio = best.get("steering_saturation_ratio")
+    delta_rate_limited_ratio = best.get("delta_rate_limited_ratio")
     overshoot_pct = best.get("lane_change_overshoot_pct")
     settling_time_s = best.get("lane_change_settling_time_s")
     speed_rms = best.get("speed_rms_error_mps")
     p95_compute = best.get("p95_compute_time_ms")
     steering_rms_text = "-" if pd.isna(steering_rms) else f"{steering_rms:.2f} deg"
     steering_rate_text = "-" if pd.isna(steering_rate_rms) else f"{steering_rate_rms:.2f} deg/s"
+    steering_rate_p95_text = (
+        "-" if pd.isna(steering_rate_p95) else f"{steering_rate_p95:.2f} deg/s"
+    )
     steering_sat_text = "-" if pd.isna(steering_sat) else str(int(steering_sat))
+    steering_sat_ratio_text = (
+        "-" if pd.isna(steering_sat_ratio) else f"{steering_sat_ratio * 100.0:.1f}%"
+    )
+    delta_rate_limited_ratio_text = (
+        "-"
+        if pd.isna(delta_rate_limited_ratio)
+        else f"{delta_rate_limited_ratio * 100.0:.1f}%"
+    )
     overshoot_text = "-" if pd.isna(overshoot_pct) else f"{overshoot_pct:.1f}%"
     settling_text = "-" if pd.isna(settling_time_s) else f"{settling_time_s:.2f} s"
     speed_rms_text = "-" if pd.isna(speed_rms) else f"{speed_rms:.3f} m/s"
@@ -1468,7 +1584,10 @@ def build_recommendation(summary_df: pd.DataFrame) -> str:
         f"max_abs_e_psi={max_heading_text}, "
         f"steering_rms={steering_rms_text}, "
         f"steering_rate_rms={steering_rate_text}, "
+        f"steering_rate_p95={steering_rate_p95_text}, "
         f"steering_sat_count={steering_sat_text}, "
+        f"steering_sat_ratio={steering_sat_ratio_text}, "
+        f"delta_rate_limited_ratio={delta_rate_limited_ratio_text}, "
         f"overshoot={overshoot_text}, "
         f"settling_time={settling_text}, "
         f"speed_rms_error={speed_rms_text}, "
@@ -1510,9 +1629,29 @@ def print_summary(
     display_df["steering_rate_rms_deg_s"] = display_df["steering_rate_rms_deg_s"].map(
         lambda value: "-" if pd.isna(value) else f"{value:.2f}"
     )
+    for column in [
+        "steering_rate_p95_deg_s",
+        "steering_rate_max_deg_s",
+        "mean_abs_delta_cmd_deg",
+        "p95_abs_delta_cmd_deg",
+        "max_abs_delta_cmd_deg",
+    ]:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(
+                lambda value: "-" if pd.isna(value) else f"{value:.2f}"
+            )
     display_df["steering_saturation_count"] = display_df["steering_saturation_count"].map(
         lambda value: "-" if pd.isna(value) else str(int(value))
     )
+    for column in ["steering_saturation_ratio", "delta_rate_limited_ratio"]:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(
+                lambda value: "-" if pd.isna(value) else f"{value * 100.0:.1f}%"
+            )
+    if "delta_rate_limited_count" in display_df.columns:
+        display_df["delta_rate_limited_count"] = display_df["delta_rate_limited_count"].map(
+            lambda value: "-" if pd.isna(value) else str(int(value))
+        )
     for column in [
         "mean_abs_speed_error_mps",
         "speed_rms_error_mps",
@@ -1549,7 +1688,13 @@ def print_summary(
         "max_abs_e_psi_deg",
         "steering_rms_deg",
         "steering_rate_rms_deg_s",
+        "steering_rate_p95_deg_s",
+        "steering_rate_max_deg_s",
+        "p95_abs_delta_cmd_deg",
+        "max_abs_delta_cmd_deg",
         "steering_saturation_count",
+        "steering_saturation_ratio",
+        "delta_rate_limited_ratio",
         "mean_abs_speed_error_mps",
         "speed_rms_error_mps",
         "lane_change_overshoot_pct",
@@ -1627,6 +1772,7 @@ def main() -> None:
             dataframe,
             lateral_threshold=args.lateral_threshold,
             heading_threshold_deg=args.heading_threshold_deg,
+            steering_limit_rad=args.steering_limit_rad,
         )
         summaries.append(summary)
         loaded_runs.append(dataframe)

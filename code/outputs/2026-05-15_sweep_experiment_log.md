@@ -1380,3 +1380,78 @@ code/outputs/evaluation_ros/stage2_preview1p0_rate2p0_clean_100s/clean
    或先对 `delta_raw` 做滤波再限幅，避免当前这种持续顶着最大斜率追踪的锯齿行为。
 4. 后续评价中需要额外输出 `delta_rate p95/max` 和 steering saturation ratio，当前 summary
    只保留 `steering_rate_rms`，不够直观。
+
+### 2026-05-17 Stage2 评估脚本补强与下一轮测试
+
+根据第一轮 clean 验证，先补强评估工具，再继续做控制参数对照。原因是第一轮 summary 中
+`speed_rms_error`、`steering_saturation_ratio` 为空，且没有直接输出 `delta_rate p95/max`，
+导致只能手动解析 tracking CSV。
+
+本次改动：
+
+- `tracker_evaluate.py`
+  - LQR 日志中的 `v_cmd` 会自动映射为评估用 `v_ref`，因此下一轮 summary 会正常输出
+    `mean_abs_speed_error_mps` 和 `speed_rms_error_mps`；
+  - LQR 日志中的 `yaw` 会映射为 `yaw_vehicle`，便于 yaw-rate 统计；
+  - 新增 `--steering-limit-rad`，当日志没有 `steering_limit` 列时用该值计算转角饱和比例；
+  - summary 新增 `steering_rate_p95_deg_s`、`steering_rate_max_deg_s`、
+    `p95_abs_delta_cmd_deg`、`max_abs_delta_cmd_deg`；
+  - summary 新增 `delta_rate_limited_count` 和 `delta_rate_limited_ratio`；
+  - terminal recommendation 中也显示 `steering_rate_p95`、`steering_sat_ratio` 和
+    `delta_rate_limited_ratio`。
+
+- `validate_ros.py`
+  - 自动调用 `tracker_evaluate.py --steering-limit-rad <max_steering_angle>`，
+    因此后续 ROS batch 评估会自动带出饱和比例。
+
+下一轮对照测试顺序：
+
+1. 保持 `lookahead=1.0m`、`max_lateral_accel=3.5`，关闭 steering rate limit：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 1.5 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_clean_100s
+```
+
+2. 若关掉 rate limit 后 `steering_rate` 更好，则进一步降低速度规划横向加速度上限：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_alat3p0_clean_100s
+```
+
+判断标准：
+
+- 如果 `steering_rate_p95/max` 和 `steering_saturation_ratio` 明显下降，同时
+  `p95_abs_e_y` 不明显变差，则说明应该优先靠速度规划降低转角需求；
+- 如果关掉 rate limit 后转角也很糟，说明根因主要是轨迹/QR/速度上限本身太激进；
+- 只有当速度规划已足够保守但转角仍有高频抖动时，再考虑把硬 slew-rate limiter 改成
+  一阶转向执行器模型或低通滤波器。

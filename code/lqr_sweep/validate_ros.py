@@ -216,6 +216,7 @@ def run_ros_validation(
         "--log", str(log_file),
         "--reference-trajectory-csv", trajectory_csv,
         "--output-dir", str(output_dir),
+        "--steering-limit-rad", str(max_steering_angle),
     ]
     print("  Running evaluation...")
     evaluator_log_file = None

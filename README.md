@@ -486,6 +486,49 @@ python3 -m lqr_sweep.validate_ros \
   --batch-name stage2_preview1p0_no_rate_limit_clean_100s
 ```
 
+如果关掉 rate limit 后 `steering_rate` 反而下降，说明前一轮锯齿主要来自硬限幅；然后保持
+rate limit 关闭，进一步测试更保守的曲率速度规划：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_alat3p0_clean_100s
+```
+
+如果 `3.0m/s` 仍然频繁打满转角，再试 `max_lateral_accel=2.5`：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 2.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_preview1p0_no_rate_limit_alat2p5_clean_100s
+```
+
 新日志字段包括 `curvature_preview`、`delta_raw`、`delta_rate_limited`。评估时重点比较：
 `delta_cmd` 峰值、`steering_rate_rms`、`delta_rate p95/max`、`steering_saturation_ratio`、
 `p95_abs_e_y` 和 `max_abs_e_y`。如果转角变平滑但横向误差明显变差，优先降低
