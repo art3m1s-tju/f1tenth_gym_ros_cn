@@ -138,6 +138,9 @@ class LqrController(Node):
         self.declare_parameter("validation_heading_noise_std_deg", 0.0)
         self.declare_parameter("validation_pose_delay_ms", 0.0)
         self.declare_parameter("validation_noise_seed", 42)
+        self.declare_parameter("enable_error_filter", False)
+        self.declare_parameter("error_filter_alpha_y", 0.30)
+        self.declare_parameter("error_filter_alpha_psi", 0.25)
 
         # ---- LQR 核心参数 ----
         self.declare_parameter("control_dt", 0.05)
@@ -211,6 +214,13 @@ class LqrController(Node):
             max(0.0, float(self.get_parameter("validation_pose_delay_ms").value)) / 1000.0
         )
         self.validation_noise_seed = int(self.get_parameter("validation_noise_seed").value)
+        self.enable_error_filter = bool(self.get_parameter("enable_error_filter").value)
+        self.error_filter_alpha_y = float(
+            np.clip(float(self.get_parameter("error_filter_alpha_y").value), 0.0, 1.0)
+        )
+        self.error_filter_alpha_psi = float(
+            np.clip(float(self.get_parameter("error_filter_alpha_psi").value), 0.0, 1.0)
+        )
 
         self.control_dt = max(1e-4, float(self.get_parameter("control_dt").value))
         self.lqr_min_model_speed = max(
@@ -257,6 +267,8 @@ class LqrController(Node):
         self.previous_delta_cmd = 0.0
         self.current_speed_cmd = 0.0  # 速度斜坡当前值
         self.open_loop_finished = False
+        self.filtered_lateral_error: float | None = None
+        self.filtered_heading_error: float | None = None
         self.pose_history = deque()
         self.noise_rng = np.random.default_rng(self.validation_noise_seed)
         self.csv_file = None
@@ -315,6 +327,8 @@ class LqrController(Node):
             f"validation_noise=({self.validation_position_noise_std:.3f}m, "
             f"{math.degrees(self.validation_heading_noise_std):.2f}deg, "
             f"{self.validation_pose_delay_sec * 1000.0:.0f}ms), "
+            f"error_filter={self.enable_error_filter}"
+            f"/({self.error_filter_alpha_y:.2f}, {self.error_filter_alpha_psi:.2f}), "
             f"Q=({self.lqr_q_lateral:.2f}, {self.lqr_q_heading:.2f}), "
             f"R={self.lqr_r_steering:.2f})."
         )
@@ -338,6 +352,10 @@ class LqrController(Node):
                 "v_cmd",
                 "e_y",
                 "e_psi",
+                "control_e_y",
+                "control_e_psi",
+                "filtered_e_y",
+                "filtered_e_psi",
                 "curvature_ref",
                 "curvature_preview",
                 "delta_raw",
@@ -392,6 +410,8 @@ class LqrController(Node):
         self.path_frame_id = msg.header.frame_id or self.tracked_frame or "map"
         self.open_loop_finished = False
         self.previous_delta_cmd = 0.0
+        self.filtered_lateral_error = None
+        self.filtered_heading_error = None
         self.get_logger().info(
             f"Loaded LQR reference path with {len(points)} points "
             f"(frame={self.path_frame_id}, closed_loop={self.path_closed_loop})."
@@ -513,6 +533,32 @@ class LqrController(Node):
             )
         return control_position, control_yaw
 
+    def _filter_control_errors(
+        self,
+        lateral_error: float,
+        heading_error: float,
+    ) -> tuple[float, float]:
+        """Low-pass control errors before LQR feedback when validation noise is enabled."""
+        if not self.enable_error_filter:
+            self.filtered_lateral_error = None
+            self.filtered_heading_error = None
+            return lateral_error, heading_error
+
+        if self.filtered_lateral_error is None or self.filtered_heading_error is None:
+            self.filtered_lateral_error = lateral_error
+            self.filtered_heading_error = heading_error
+            return lateral_error, heading_error
+
+        self.filtered_lateral_error = (
+            self.error_filter_alpha_y * lateral_error
+            + (1.0 - self.error_filter_alpha_y) * self.filtered_lateral_error
+        )
+        heading_delta = wrap_angle(heading_error - self.filtered_heading_error)
+        self.filtered_heading_error = wrap_angle(
+            self.filtered_heading_error + self.error_filter_alpha_psi * heading_delta
+        )
+        return self.filtered_lateral_error, self.filtered_heading_error
+
     def _preview_curvature(self, sample: ReferenceSample) -> float:
         """返回从当前投影点向前 lookahead 距离内的最大绝对曲率。"""
         if (
@@ -627,6 +673,10 @@ class LqrController(Node):
         v_cmd: float,
         lateral_error: float,
         heading_error: float,
+        control_lateral_error: float,
+        control_heading_error: float,
+        filtered_lateral_error: float,
+        filtered_heading_error: float,
         sample: ReferenceSample,
         curvature_preview: float,
         delta_raw: float,
@@ -651,6 +701,10 @@ class LqrController(Node):
                 f"{v_cmd:.6f}",
                 f"{lateral_error:.6f}",
                 f"{heading_error:.6f}",
+                f"{control_lateral_error:.6f}",
+                f"{control_heading_error:.6f}",
+                f"{filtered_lateral_error:.6f}",
+                f"{filtered_heading_error:.6f}",
                 f"{sample.curvature:.6f}",
                 f"{curvature_preview:.6f}",
                 f"{delta_raw:.6f}",
@@ -733,8 +787,12 @@ class LqrController(Node):
         truth_sample = self._sample_reference(position)
 
         normal = np.array([-math.sin(sample.heading), math.cos(sample.heading)])
-        lateral_error = float((control_position - sample.point) @ normal)
-        heading_error = wrap_angle(control_yaw - sample.heading)
+        raw_lateral_error = float((control_position - sample.point) @ normal)
+        raw_heading_error = wrap_angle(control_yaw - sample.heading)
+        lateral_error, heading_error = self._filter_control_errors(
+            raw_lateral_error,
+            raw_heading_error,
+        )
         truth_normal = np.array([-math.sin(truth_sample.heading), math.cos(truth_sample.heading)])
         truth_lateral_error = float((position - truth_sample.point) @ truth_normal)
         truth_heading_error = wrap_angle(yaw - truth_sample.heading)
@@ -799,6 +857,10 @@ class LqrController(Node):
             v_cmd=v_cmd,
             lateral_error=truth_lateral_error,
             heading_error=truth_heading_error,
+            control_lateral_error=raw_lateral_error,
+            control_heading_error=raw_heading_error,
+            filtered_lateral_error=lateral_error,
+            filtered_heading_error=heading_error,
             sample=truth_sample,
             curvature_preview=curvature_preview,
             delta_raw=delta_raw,

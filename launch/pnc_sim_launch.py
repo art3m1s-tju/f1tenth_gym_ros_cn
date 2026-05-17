@@ -42,6 +42,9 @@ def generate_launch_description():
         DeclareLaunchArgument('validation_heading_noise_std_deg', default_value='0.0'),
         DeclareLaunchArgument('validation_pose_delay_ms', default_value='0.0'),
         DeclareLaunchArgument('validation_noise_seed', default_value='42'),
+        DeclareLaunchArgument('enable_error_filter', default_value='false'),
+        DeclareLaunchArgument('error_filter_alpha_y', default_value='0.30'),
+        DeclareLaunchArgument('error_filter_alpha_psi', default_value='0.25'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
         DeclareLaunchArgument('control_friendly_alpha', default_value='0.56'),
         DeclareLaunchArgument('control_friendly_auto_alpha', default_value='true'),
@@ -139,6 +142,9 @@ def generate_launch_description():
         heading_noise = LaunchConfiguration('validation_heading_noise_std_deg').perform(context)
         pose_delay = LaunchConfiguration('validation_pose_delay_ms').perform(context)
         noise_seed = LaunchConfiguration('validation_noise_seed').perform(context)
+        error_filter = LaunchConfiguration('enable_error_filter').perform(context)
+        error_alpha_y = LaunchConfiguration('error_filter_alpha_y').perform(context)
+        error_alpha_psi = LaunchConfiguration('error_filter_alpha_psi').perform(context)
         traj_mode = LaunchConfiguration('trajectory_mode').perform(context)
         cf_alpha = LaunchConfiguration('control_friendly_alpha').perform(context)
         cf_auto = LaunchConfiguration('control_friendly_auto_alpha').perform(context)
@@ -197,6 +203,9 @@ def generate_launch_description():
             '-p', f'validation_heading_noise_std_deg:={heading_noise}',
             '-p', f'validation_pose_delay_ms:={pose_delay}',
             '-p', f'validation_noise_seed:={noise_seed}',
+            '-p', f'enable_error_filter:={error_filter}',
+            '-p', f'error_filter_alpha_y:={error_alpha_y}',
+            '-p', f'error_filter_alpha_psi:={error_alpha_psi}',
             '-p', f'lqr_q_lateral:={q_lat}',
             '-p', f'lqr_q_heading:={q_head}',
             '-p', f'lqr_r_steering:={r_steer}',

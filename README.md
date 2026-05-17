@@ -627,6 +627,45 @@ python3 -m lqr_sweep.validate_ros \
   --batch-name stage2_ablation_yaw1deg_alat3p5_clean_100s
 ```
 
+误差滤波验证：在 yaw/position/full-light 噪声下打开 `e_y/e_psi` 低通滤波。评估仍使用真实
+`e_y/e_psi`，新增日志字段 `control_e_y/control_e_psi/filtered_e_y/filtered_e_psi`
+用于查看滤波前后的控制误差。建议先用 `alpha_y=0.30`、`alpha_psi=0.25`。
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_filter_light_alphaY0p30_alphaPsi0p25_100s
+```
+
+若只想拆分滤波效果，把上面命令中的 `--noise-profile light` 换成：
+
+```bash
+--noise-profile clean --position-noise-std 0.02
+```
+
+或：
+
+```bash
+--noise-profile clean --heading-noise-std-deg 1.0
+```
+
 如果 delay-only 就明显变差，优先处理延迟补偿、降低高速上限或增大曲率预瞄；如果 position-only
 明显变差，优先滤波 `x/y` 或 `e_y`；如果 heading-only 明显变差，优先滤波 yaw 或 `e_psi`。
 

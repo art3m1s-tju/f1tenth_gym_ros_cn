@@ -1911,3 +1911,68 @@ LQR 反馈前抑制测量噪声，同时保留 LQR 的结构。
 1. yaw-only 和 pos-only，确认 steering rate 能否显著下降；
 2. full light，确认噪声叠加下是否仍可控；
 3. delay-only 若仍明显恶化，再单独测试 `lookahead=1.5m` 或降低 `max_lateral_accel`。
+
+### 2026-05-17 Stage2 误差低通滤波实现记录
+
+根据 noise ablation 的结论，本轮先不恢复硬 steering rate limiter，而是在 LQR 反馈前加入可开关的
+误差低通滤波：
+
+- `enable_error_filter`
+- `error_filter_alpha_y`
+- `error_filter_alpha_psi`
+
+实现位置：
+
+- `code/pnc_rc/lqr/controller.py`
+  - 对控制器看到的 `raw_lateral_error/raw_heading_error` 做一阶低通；
+  - 航向误差滤波使用 `wrap_angle` 处理角度跳变；
+  - LQR 使用滤波后的 `e_y/e_psi`；
+  - CSV 中真实评估误差仍写入原有 `e_y/e_psi`，避免评估结果被滤波后的控制误差“美化”；
+  - 新增日志字段：
+    - `control_e_y`
+    - `control_e_psi`
+    - `filtered_e_y`
+    - `filtered_e_psi`
+- `launch/pnc_sim_launch.py`
+  - 新增对应 launch 参数并传给 LQR 控制器；
+- `code/lqr_sweep/validate_ros.py`
+  - 新增命令行参数：
+    - `--enable-error-filter`
+    - `--error-filter-alpha-y`
+    - `--error-filter-alpha-psi`
+  - batch manifest 同步记录滤波开关和 alpha 参数。
+- `README.md`
+  - 增加 Stage2 滤波验证命令。
+
+建议先测试：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_filter_light_alphaY0p30_alphaPsi0p25_100s
+```
+
+预期：
+
+- yaw/position 噪声引起的 `steering_rate_rms` 和 `steering_rate_p95` 应明显下降；
+- 如果 full-light 下 `p95/max e_y` 仍偏大，主要问题就不再是测量噪声高频，而是
+  `60ms` 延迟导致的闭环相位滞后，需要单独用更保守速度规划、增大曲率预瞄或延迟补偿处理；
+- 若滤波后 clean/noise 跟踪误差变差明显，说明 alpha 过小，下一轮应试
+  `alpha_y=0.40`、`alpha_psi=0.35`。

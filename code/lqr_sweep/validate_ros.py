@@ -78,6 +78,9 @@ def run_ros_validation(
     heading_noise_std_deg: float = 0.0,
     pose_delay_ms: float = 0.0,
     noise_seed: int = 42,
+    enable_error_filter: bool = False,
+    error_filter_alpha_y: float = 0.30,
+    error_filter_alpha_psi: float = 0.25,
     launch_log_path: Path | None = None,
     evaluator_log_path: Path | None = None,
     enable_rviz: bool = True,
@@ -140,6 +143,9 @@ def run_ros_validation(
         f"validation_heading_noise_std_deg:={heading_noise_std_deg}",
         f"validation_pose_delay_ms:={pose_delay_ms}",
         f"validation_noise_seed:={noise_seed}",
+        f"enable_error_filter:={str(enable_error_filter).lower()}",
+        f"error_filter_alpha_y:={error_filter_alpha_y}",
+        f"error_filter_alpha_psi:={error_filter_alpha_psi}",
         f"track_csv:={track_csv}",
         f"trajectory_csv:={trajectory_csv}",
         f"log_path:={log_path}",
@@ -167,6 +173,12 @@ def run_ros_validation(
         f"pos={position_noise_std:.3f}m, "
         f"heading={heading_noise_std_deg:.2f}deg, "
         f"delay={pose_delay_ms:.0f}ms, seed={noise_seed}"
+    )
+    print(
+        "  Error filter: "
+        f"enabled={enable_error_filter}, "
+        f"alpha_y={error_filter_alpha_y:.2f}, "
+        f"alpha_psi={error_filter_alpha_psi:.2f}"
     )
 
     launch_log_file = None
@@ -349,6 +361,9 @@ def run_batch_ros_validation(
     heading_noise_std_deg: float,
     pose_delay_ms: float,
     noise_seed: int,
+    enable_error_filter: bool,
+    error_filter_alpha_y: float,
+    error_filter_alpha_psi: float,
 ) -> None:
     """Run ROS/RViz validation for multiple speeds and archive each run."""
     noise_folder = _noise_folder_name(
@@ -387,6 +402,9 @@ def run_batch_ros_validation(
                 "heading_noise_std_deg",
                 "pose_delay_ms",
                 "noise_seed",
+                "error_filter",
+                "error_filter_alpha_y",
+                "error_filter_alpha_psi",
             ]
         )
 
@@ -435,6 +453,9 @@ def run_batch_ros_validation(
                 heading_noise_std_deg=heading_noise_std_deg,
                 pose_delay_ms=pose_delay_ms,
                 noise_seed=noise_seed,
+                enable_error_filter=enable_error_filter,
+                error_filter_alpha_y=error_filter_alpha_y,
+                error_filter_alpha_psi=error_filter_alpha_psi,
                 launch_log_path=launch_log,
                 evaluator_log_path=evaluator_log,
                 enable_rviz=enable_rviz,
@@ -462,6 +483,9 @@ def run_batch_ros_validation(
                     f"{heading_noise_std_deg:.4f}",
                     f"{pose_delay_ms:.1f}",
                     noise_seed,
+                    int(enable_error_filter),
+                    f"{error_filter_alpha_y:.3f}",
+                    f"{error_filter_alpha_psi:.3f}",
                 ]
             )
             f.flush()
@@ -552,6 +576,23 @@ if __name__ == "__main__":
     )
     p.add_argument("--noise-seed", type=int, default=42)
     p.add_argument(
+        "--enable-error-filter",
+        action="store_true",
+        help="Low-pass control e_y/e_psi before LQR feedback; true e_y/e_psi are still logged for evaluation.",
+    )
+    p.add_argument(
+        "--error-filter-alpha-y",
+        type=float,
+        default=0.30,
+        help="First-order low-pass alpha for lateral control error.",
+    )
+    p.add_argument(
+        "--error-filter-alpha-psi",
+        type=float,
+        default=0.25,
+        help="First-order low-pass alpha for heading control error.",
+    )
+    p.add_argument(
         "--disable-curvature-speed-limit",
         action="store_true",
         help="Disable curvature-based speed limiting during ROS validation.",
@@ -607,6 +648,9 @@ if __name__ == "__main__":
             heading_noise_std_deg=heading_noise_std_deg,
             pose_delay_ms=pose_delay_ms,
             noise_seed=args.noise_seed,
+            enable_error_filter=args.enable_error_filter,
+            error_filter_alpha_y=args.error_filter_alpha_y,
+            error_filter_alpha_psi=args.error_filter_alpha_psi,
         )
     else:
         out = Path(args.output_dir) if args.output_dir else None
@@ -634,5 +678,8 @@ if __name__ == "__main__":
             heading_noise_std_deg=heading_noise_std_deg,
             pose_delay_ms=pose_delay_ms,
             noise_seed=args.noise_seed,
+            enable_error_filter=args.enable_error_filter,
+            error_filter_alpha_y=args.error_filter_alpha_y,
+            error_filter_alpha_psi=args.error_filter_alpha_psi,
             enable_rviz=not args.disable_rviz,
         )
