@@ -68,7 +68,7 @@ except ImportError:
         return _Dummy(**kwargs)
 
 from lqr_sweep.lookup_table import LqrParams, LqrLookupTable
-from lqr_sweep.objective import compute_objective
+from lqr_sweep.objective import DEFAULT_OBJECTIVE, ObjectiveConfig, compute_objective
 from lqr_sweep.sim_harness import SimConfig, run_single_sim, load_trajectory_cache
 
 
@@ -87,6 +87,7 @@ class SweepConfig:
         refine_top_k: 对粗搜索排名前 K 的参数做局部细化。
         refine_grid_size: 每个维度的局部细化采样数量。
         refine_range_factor: 局部细化范围相对中心值的比例。
+        objective_config: 目标函数配置。
         max_workers: 并行仿真的最大进程数；为 ``None`` 时自动使用 CPU 数量。
     """
 
@@ -100,6 +101,7 @@ class SweepConfig:
     refine_top_k: int = 3
     refine_grid_size: int = 3
     refine_range_factor: float = 0.3
+    objective_config: ObjectiveConfig = DEFAULT_OBJECTIVE
     max_workers: int | None = None
 
 
@@ -191,13 +193,13 @@ def _evaluate_single(args: tuple) -> tuple[LqrParams, float, str, dict]:
         ``(参数, 分数, 失败原因, 指标)``；仿真失败或约束淘汰时分数为无穷大。
     """
 
-    sim_config, params, target_speed = args
+    sim_config, params, target_speed, objective_config = args
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="Chosen integrator is RK4")
         result = run_single_sim(sim_config, params, target_speed)
     if not result.success:
         return params, math.inf, result.failure_reason, result.metrics
-    score = compute_objective(result.metrics)
+    score = compute_objective(result.metrics, objective_config)
     failure_reason = "" if math.isfinite(score) else "objective_constraints"
     return params, score, failure_reason, result.metrics
 
@@ -290,7 +292,10 @@ def run_speed_point_sweep(
     if verbose:
         print(f"  [v={speed:.1f}] Coarse grid: {len(coarse_grid)} evaluations...")
 
-    args_list = [(sim_config, p, speed) for p in coarse_grid]
+    args_list = [
+        (sim_config, p, speed, sweep_config.objective_config)
+        for p in coarse_grid
+    ]
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         all_results = _run_batch(args_list, executor, desc=f"v={speed:.1f} coarse")
@@ -312,7 +317,10 @@ def run_speed_point_sweep(
             if verbose:
                 print(f"  [v={speed:.1f}] Refine grid: {len(refine_grid)} evaluations...")
 
-            refine_args = [(sim_config, p, speed) for p in refine_grid]
+            refine_args = [
+                (sim_config, p, speed, sweep_config.objective_config)
+                for p in refine_grid
+            ]
             all_results.extend(_run_batch(refine_args, executor, desc=f"v={speed:.1f} refine"))
             all_results.sort(key=lambda x: x[1])
 

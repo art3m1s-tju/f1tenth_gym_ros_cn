@@ -886,3 +886,270 @@ python3 -m lqr_sweep.run_sweep --mode single \
 ```
 
 如果这些插值点也稳定，可以进入原地图 ROS 验证阶段。
+
+## 23. 阶段 1：原地图 ROS 验证脚本增强
+
+### 目标
+
+将 stadium 标定得到的 `lqr_gain_table.yaml` 放回原地图完整 ROS 链路中验证，检查：
+
+- LQR controller 是否正常启动并发布 `/drive`。
+- 原地图轨迹上是否能完成多圈。
+- 曲率限速和 speed ramp 开启后是否能避免急弯硬冲。
+- 生成的 tracking log 是否可以用 `tracker_evaluate.py` 评估。
+
+### 修改
+
+`code/lqr_sweep/validate_ros.py` 增强 CLI 参数透传能力：
+
+```
+--track-csv
+--trajectory-csv
+--log-path
+--min-speed
+--max-lateral-accel
+--max-steering-angle
+--use-tf-pose
+--disable-curvature-speed-limit
+--disable-speed-ramp
+--max-accel
+--max-decel
+```
+
+默认行为用于原地图安全验证：
+
+- 开启曲率限速。
+- 开启速度斜坡。
+- 默认 `use_tf_pose=false`，直接使用 `/ego_racecar/odom` 位姿，避免 TF 链路不完整导致 LQR 不发控制。
+
+### 原地图验证命令
+
+```
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 1.5 \
+  --laps 3 \
+  --timeout 240 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --log-path /sim_ws/src/f1tenth_gym_ros/code/outputs/logs/ros_validate_original_map_1p5.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/original_map_table_1p5
+```
+
+### 成功标准
+
+- 终端出现 `LQR controller started`。
+- `/drive` 有稳定发布。
+- `completed laps >= 3`。
+- `steering_saturation_ratio` 接近 0。
+- `max_abs_e_y < 0.25 m`，`mean_abs_e_y < 0.05 m`。
+
+### 阶段一批量 RViz 验证补充
+
+单独验证 `1.5m/s` 不足以覆盖原地图风险，因此 `validate_ros.py` 增加批量模式：
+
+```
+--mode batch
+```
+
+批量模式用于从 `0.5m/s` 到 `3.0m/s` 每隔 `0.5m/s` 做一组原地图 RViz 验证。每组默认可以跑满 `300s`，并将该组实验单独归档：
+
+```
+evaluation_ros/<batch_name>/
+  manifest.csv
+  v0p5_table_stadium_curv1_ramp1_alat4p0_<timestamp>/
+    logs/
+      *_launch.log
+      *_tracking.csv
+    evaluation/
+      lookahead_summary.csv
+      lookahead_summary.json
+      *_lateral_error.png
+      *_heading_error.png
+      *_path_overlay.png
+      *_timing.png
+```
+
+推荐命令：
+
+```
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --timeout 300 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name original_map_rviz_table_curvlimit_ramp_0p5_to_3p0_300s
+```
+
+其中 `--laps 99` 用于避免完成几圈后提前停止，让每组尽量跑满 `300s`。如果某组撞车或 ROS 节点退出，仍会保留 launch log 和已有 tracking log，便于定位问题。
+
+### Worktree 使用注意
+
+`--mode batch` 是阶段一分支 `stage/original-map-validate` 的新功能。如果容器仍从主目录启动：
+
+```
+/home/art3m1s/f1tenth_gym_ros
+```
+
+则容器内挂载的是 main 工作区，旧版 `validate_ros.py` 不包含批量参数，会出现：
+
+```
+unrecognized arguments: --mode batch --speeds ...
+```
+
+阶段一测试必须从阶段一 worktree 启动容器：
+
+```
+cd /home/art3m1s/f1tenth_stage1_original_map_validate
+rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+另外，如果将单轮测试时间从 `300s` 改为 `150s`，`--batch-name` 也应同步改成包含 `150s`，避免结果目录命名和真实测试时长不一致。
+
+### Headless 批量测试修正
+
+RViz 只用于人工观察；批量统计时可以关闭，减少图形渲染和窗口状态对 ROS 进程的干扰。`pnc_sim_launch.py` 新增：
+
+```
+enable_rviz:=false
+```
+
+`validate_ros.py` 对应新增：
+
+```
+--disable-rviz
+```
+
+后续自动批量测试建议默认加上 `--disable-rviz`。
+
+同时修正两个归档问题：
+
+- 速度标签从一位小数改为保留必要小数，避免 `0.75m/s` 被命名成 `v0p8`。
+- 每组测试新增 `logs/*_evaluator.log`。如果 `tracker_evaluate.py` 失败，会在 `evaluation/` 下写入 `evaluation_failed.txt`，避免出现空 evaluation 文件夹却没有错误原因。
+
+### 阶段一噪声/延迟验证选项
+
+为避免只在理想 odom 下验证参数，阶段一 ROS 验证新增可选的位姿噪声和延迟注入。默认仍然是干净测试，不影响已有命令：
+
+```
+--noise-profile clean
+```
+
+新增轻量鲁棒性测试 preset：
+
+```
+--noise-profile light
+```
+
+该 preset 会让 LQR 控制器“看到”的位姿带有 `2cm` 位置高斯噪声、`1deg` 航向高斯噪声和 `60ms` 位姿延迟。控制使用带噪声/延迟的位姿，但 tracking CSV 仍记录真实 odom 相对参考轨迹的误差，因此评估图和 summary 反映的是噪声控制后真实车辆轨迹是否变差。
+
+如需单独调节强度，可覆盖：
+
+```
+--position-noise-std 0.02
+--heading-noise-std-deg 1.0
+--pose-delay-ms 60
+--noise-seed 42
+```
+
+归档结构同步调整为按噪声条件分文件夹，避免 clean 和 noisy 结果混在一起：
+
+```
+evaluation_ros/<batch_name>/clean/
+evaluation_ros/<batch_name>/noisy_light_pos2cm_yaw1deg_delay60ms/
+```
+
+推荐先跑 `clean` 作为基线，再跑 `light` 看 `mean_abs_e_y`、`p95_abs_e_y`、`max_abs_e_y`、`mean_abs_e_psi`、`steering_rate_rms` 是否明显恶化。若 clean 通过但 light 下误差或转向变化率明显放大，说明当前表对感知/定位扰动比较敏感，后续再考虑增大 `R`、降低高速度段激进程度或调速度规划。
+
+### 低速航向误差优化
+
+低速段补扫 `0.5, 0.625, 0.75, 0.875, 1.0m/s` 后，横向误差明显改善，但 `0.62~1.0m/s` 的航向误差仍偏大：
+
+- `0.62m/s`: `mean_abs_e_y=2.19cm`, `p95_abs_e_y=3.83cm`, `mean_abs_e_psi=4.21deg`, `p95_abs_e_psi=8.28deg`
+- `0.75m/s`: `mean_abs_e_y=1.86cm`, `p95_abs_e_y=3.26cm`, `mean_abs_e_psi=4.06deg`, `p95_abs_e_psi=8.05deg`
+- `1.0m/s`: `mean_abs_e_y=1.57cm`, `p95_abs_e_y=2.55cm`, `mean_abs_e_psi=3.87deg`, `p95_abs_e_psi=7.55deg`
+
+原因判断：原 sweep 目标函数主要由平均横向误差和平均航向误差组成，且低速 sweep 允许 `q_heading=0.5`、`R=30`。结果低速段容易选到“横向贴线但航向修正很弱”的保守控制器。
+
+解决方式：新增 `run_sweep.py` 的低速航向优化 profile：
+
+```
+--objective-profile low-speed-heading
+```
+
+该 profile 会：
+
+- 在目标函数中加入 `p95_abs_e_y` 和 `p95_abs_e_psi_deg`；
+- 提高 `mean/p95` 航向误差的排序权重；
+- 默认将 `q_heading` 搜索范围改为 `2.0~12.0`；
+- 默认将 `R` 搜索范围收窄为 `3.0~15.0`，避免候选长期顶到高 `R`。
+
+推荐下一轮低速航向优化命令：
+
+```
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.run_sweep --mode full \
+  --map-path /sim_ws/src/f1tenth_gym_ros/maps/stadium_3ms_open \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/stadium_3ms_trajectory.csv \
+  --speeds 0.5 0.625 0.75 0.875 1.0 \
+  --coarse-grid 5,4,5,3 \
+  --laps 3 \
+  --max-sim-time 420 \
+  --disable-curvature-speed-limit \
+  --disable-speed-ramp \
+  --objective-profile low-speed-heading \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium_low_speed_heading
+```
+
+2026-05-17 复扫过程中发现该 profile 仍然会在 `0.6~0.9m/s` 选到 `q_heading` 下界和 `R` 上界，例如 `q_heading=1.0`、`R=25.0`。因此进一步加强该 profile：
+
+- 权重从 `lateral_mean=0.30, heading_mean=0.35, lateral_p95=0.10, heading_p95=0.25` 调整为 `0.15, 0.45, 0.05, 0.35`；
+- 默认 `q_heading_range` 从 `1.0~6.0` 改为 `2.0~12.0`；
+- 默认 `r_steering_range` 从 `3.0~25.0` 改为 `3.0~15.0`。
+
+若复扫后仍然撞 `q_heading` 下界或 `R` 上界，说明单纯调权重还不够，下一步应直接加硬约束或固定一组低速候选范围，例如 `q_heading=3~12`、`R=3~10`。
+
+### 第一阶段收尾与进入第二阶段结论
+
+2026-05-17 将低速补点表合并进主表后，完成原地图 clean 验证。该轮验证使用曲率限速和速度斜坡，运行时长实际为 `60s`，结果显示：
+
+- `0.5~2.0m/s` 横向误差整体可控，适合作为后续低速/中速实车候选；
+- `2.5m/s` 横向误差仍可接受，但转向变化率已经升高，需要谨慎；
+- `3.0m/s` 虽然仿真横向误差不算爆炸，但控制动作过激，实车风险较高。
+
+关键 `3.0m/s` 指标：
+
+- `mean_abs_e_y=2.47cm`
+- `p95_abs_e_y=5.33cm`
+- `max_abs_e_y=6.07cm`
+- `steering_rms=10.71deg`
+- `steering_rate_rms=49.9deg/s`
+- `delta_cmd p95_abs=0.299rad`
+- `delta_cmd max_abs=0.36rad`，已触及转角限幅
+- `steering saturation ratio≈2.8%`
+- `delta_rate p95≈118deg/s`
+- `delta_rate max≈743deg/s`
+
+判断：第一阶段已经完成“LQR 参数表生成 + 原地图 ROS 验证 + 低速补点 + 噪声/延迟压力测试 + 高速风险识别”。当前主要瓶颈不再是继续微调 `Q/R`，而是高速弯道前没有足够提前、平滑的速度规划，以及控制器缺少实车友好的转角速率限制。
+
+因此第一阶段可以合并入 `main`，进入第二阶段。第二阶段目标：
+
+1. 实现前方曲率预瞄速度规划，而不是只看当前点曲率；
+2. 对速度 profile 做加速度/减速度平滑，确保入弯前提前降速；
+3. 给 LQR 输出增加 steering rate limit，避免实车舵机收到过大的瞬时转角变化；
+4. 先在原地图 clean 验证，再做 light noisy 压力测试；
+5. 实车测试从 `0.5 -> 1.0 -> 1.5m/s` 递进，不直接上 `3.0m/s`。

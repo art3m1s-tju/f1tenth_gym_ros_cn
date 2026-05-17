@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import math
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -130,6 +131,10 @@ class LqrController(Node):
         self.declare_parameter("enable_speed_ramp", True)
         self.declare_parameter("max_accel", 0.8)
         self.declare_parameter("max_decel", 1.5)
+        self.declare_parameter("validation_position_noise_std", 0.0)
+        self.declare_parameter("validation_heading_noise_std_deg", 0.0)
+        self.declare_parameter("validation_pose_delay_ms", 0.0)
+        self.declare_parameter("validation_noise_seed", 42)
 
         # ---- LQR 核心参数 ----
         self.declare_parameter("control_dt", 0.05)
@@ -181,6 +186,17 @@ class LqrController(Node):
         self.enable_speed_ramp = bool(self.get_parameter("enable_speed_ramp").value)
         self.max_accel = max(0.0, float(self.get_parameter("max_accel").value))
         self.max_decel = max(0.0, float(self.get_parameter("max_decel").value))
+        self.validation_position_noise_std = max(
+            0.0,
+            float(self.get_parameter("validation_position_noise_std").value),
+        )
+        self.validation_heading_noise_std = math.radians(
+            max(0.0, float(self.get_parameter("validation_heading_noise_std_deg").value))
+        )
+        self.validation_pose_delay_sec = (
+            max(0.0, float(self.get_parameter("validation_pose_delay_ms").value)) / 1000.0
+        )
+        self.validation_noise_seed = int(self.get_parameter("validation_noise_seed").value)
 
         self.control_dt = max(1e-4, float(self.get_parameter("control_dt").value))
         self.lqr_min_model_speed = max(
@@ -225,6 +241,8 @@ class LqrController(Node):
         self.previous_stamp_sec: float | None = None
         self.current_speed_cmd = 0.0  # 速度斜坡当前值
         self.open_loop_finished = False
+        self.pose_history = deque()
+        self.noise_rng = np.random.default_rng(self.validation_noise_seed)
         self.csv_file = None
         self.csv_writer = None
         self.csv_rows_since_flush = 0
@@ -275,6 +293,9 @@ class LqrController(Node):
             f"(path_topic={self.path_topic}, odom_topic={self.odom_topic}, "
             f"drive_topic={self.drive_topic}, use_tf_pose={self.use_tf_pose}, "
             f"target_speed={self.target_speed:.2f}, "
+            f"validation_noise=({self.validation_position_noise_std:.3f}m, "
+            f"{math.degrees(self.validation_heading_noise_std):.2f}deg, "
+            f"{self.validation_pose_delay_sec * 1000.0:.0f}ms), "
             f"Q=({self.lqr_q_lateral:.2f}, {self.lqr_q_heading:.2f}), "
             f"R={self.lqr_r_steering:.2f})."
         )
@@ -426,6 +447,41 @@ class LqrController(Node):
             closest_idx=proj.closest_idx,
         )
 
+    def _validation_pose_for_control(
+        self,
+        position: np.ndarray,
+        yaw: float,
+        stamp_sec: float,
+    ) -> tuple[np.ndarray, float]:
+        """Return the delayed/noisy pose used only by validation control."""
+        self.pose_history.append((stamp_sec, position.copy(), float(yaw)))
+
+        delayed_position = position
+        delayed_yaw = yaw
+        if self.validation_pose_delay_sec > 0.0:
+            cutoff = stamp_sec - self.validation_pose_delay_sec
+            while len(self.pose_history) > 1 and self.pose_history[1][0] <= cutoff:
+                self.pose_history.popleft()
+            delayed_position = self.pose_history[0][1]
+            delayed_yaw = self.pose_history[0][2]
+        else:
+            self.pose_history.clear()
+
+        control_position = delayed_position.copy()
+        control_yaw = float(delayed_yaw)
+        if self.validation_position_noise_std > 0.0:
+            control_position += self.noise_rng.normal(
+                0.0,
+                self.validation_position_noise_std,
+                size=2,
+            )
+        if self.validation_heading_noise_std > 0.0:
+            control_yaw = wrap_angle(
+                control_yaw
+                + float(self.noise_rng.normal(0.0, self.validation_heading_noise_std))
+            )
+        return control_position, control_yaw
+
     def _compute_speed_command(self, delta_cmd: float, curvature_ref: float) -> float:
         """根据转向指令和参考曲率计算安全速度。"""
         if self.enable_curvature_speed_limit:
@@ -570,11 +626,20 @@ class LqrController(Node):
         vx = float(msg.twist.twist.linear.x)
         vy = float(msg.twist.twist.linear.y)
         v_actual = float(math.hypot(vx, vy))
-        sample = self._sample_reference(position)
+        control_position, control_yaw = self._validation_pose_for_control(
+            position,
+            yaw,
+            stamp_sec,
+        )
+        sample = self._sample_reference(control_position)
+        truth_sample = self._sample_reference(position)
 
         normal = np.array([-math.sin(sample.heading), math.cos(sample.heading)])
-        lateral_error = float((position - sample.point) @ normal)
-        heading_error = wrap_angle(yaw - sample.heading)
+        lateral_error = float((control_position - sample.point) @ normal)
+        heading_error = wrap_angle(control_yaw - sample.heading)
+        truth_normal = np.array([-math.sin(truth_sample.heading), math.cos(truth_sample.heading)])
+        truth_lateral_error = float((position - truth_sample.point) @ truth_normal)
+        truth_heading_error = wrap_angle(yaw - truth_sample.heading)
 
         dt = self.control_dt
         if self.previous_stamp_sec is not None:
@@ -630,9 +695,9 @@ class LqrController(Node):
             yaw=yaw,
             v_actual=v_actual,
             v_cmd=v_cmd,
-            lateral_error=lateral_error,
-            heading_error=heading_error,
-            sample=sample,
+            lateral_error=truth_lateral_error,
+            heading_error=truth_heading_error,
+            sample=truth_sample,
             delta_feedback=delta_feedback,
             delta_feedforward=delta_feedforward,
             delta_cmd=delta_cmd,

@@ -297,12 +297,139 @@ python3 -m lqr_sweep.run_sweep --mode validate \
 ```bash
 cd /sim_ws/src/f1tenth_gym_ros/code
 python3 -m lqr_sweep.validate_ros \
-  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep/lqr_gain_table.yaml \
-  --speed 3.0 \
-  --laps 5 \
-  --timeout 180 \
-  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/lqr_table_v3p0_5laps
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 1.5 \
+  --laps 3 \
+  --timeout 240 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --log-path /sim_ws/src/f1tenth_gym_ros/code/outputs/logs/ros_validate_original_map_1p5.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/original_map_table_1p5
 ```
+
+原地图验证默认开启曲率限速和速度斜坡，并默认使用 `/ego_racecar/odom` 位姿
+（`use_tf_pose=false`），这样可以先排除 TF 链路不完整导致 LQR 不发 `/drive`
+的问题。若要显式使用 TF 位姿，可加 `--use-tf-pose`。
+
+#### 原地图 RViz 批量验证
+
+阶段一推荐使用批量 RViz 验证脚本，从 `0.5m/s` 到 `3.0m/s` 每隔 `0.5m/s`
+测试一组。每组运行 300 秒，自动保存 launch 输出、tracking log、评估 summary 和可视化图片。
+
+注意：`--mode batch` 是阶段一分支 `stage/original-map-validate` 里的新功能。
+如果你还在主目录 `/home/art3m1s/f1tenth_gym_ros` 启动容器，容器里会挂载 main
+工作区，旧版 `validate_ros.py` 不认识 `--mode`、`--speeds`、`--batch-name`。
+
+测试阶段一时需要从阶段一 worktree 启动容器：
+
+```bash
+cd /home/art3m1s/f1tenth_stage1_original_map_validate
+rocker --nvidia --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+无 N 卡则使用：
+
+```bash
+cd /home/art3m1s/f1tenth_stage1_original_map_validate
+rocker --x11 --volume .:/sim_ws/src/f1tenth_gym_ros -- f1tenth_gym_ros
+```
+
+进入容器后再运行批量验证：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --timeout 300 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name original_map_table_curvlimit_ramp_0p5_to_3p0_300s
+```
+
+如果要做更接近实车的鲁棒性验证，保持同一套参数和赛道，额外跑一组轻量噪声/延迟：
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 0.5 1.0 1.5 2.0 2.5 3.0 \
+  --timeout 300 \
+  --laps 99 \
+  --track-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv \
+  --min-speed 0.4 \
+  --max-lateral-accel 4.0 \
+  --max-accel 1.0 \
+  --max-decel 2.0 \
+  --noise-profile light \
+  --noise-seed 42 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name original_map_table_curvlimit_ramp_0p5_to_3p0_300s
+```
+
+`--noise-profile clean` 不注入噪声；`--noise-profile light` 会给控制器看到的位姿加入 `2cm`
+位置噪声、`1deg` 航向噪声和 `60ms` 位姿延迟。评估仍使用真实 odom 日志，所以比较的是
+“带噪声控制之后实际轨迹变差多少”。也可以用 `--position-noise-std`、
+`--heading-noise-std-deg`、`--pose-delay-ms` 单独覆盖默认值。
+
+输出目录结构示例：
+
+```text
+code/outputs/evaluation_ros/original_map_table_curvlimit_ramp_0p5_to_3p0_300s/
+├── clean/
+│   ├── manifest.csv
+│   └── v0p5_table_stadium_curv1_ramp1_alat4p0_clean_YYYYmmdd_HHMMSS/
+│       ├── logs/
+│       │   ├── ..._launch.log
+│       │   ├── ..._evaluator.log
+│       │   └── ..._tracking.csv
+│       └── evaluation/
+│           ├── lookahead_summary.csv
+│           ├── lookahead_summary.json
+│           └── *_lateral_error.png / *_heading_error.png / *_path_overlay.png
+└── noisy_light_pos2cm_yaw1deg_delay60ms/
+    ├── manifest.csv
+    └── v0p5_table_stadium_curv1_ramp1_alat4p0_noisy_light_pos2cm_yaw1deg_delay60ms_YYYYmmdd_HHMMSS/
+        ├── logs/
+        │   ├── ..._launch.log
+        │   ├── ..._evaluator.log
+        │   └── ..._tracking.csv
+        └── evaluation/
+            ├── lookahead_summary.csv
+            ├── lookahead_summary.json
+            └── *_lateral_error.png / *_heading_error.png / *_path_overlay.png
+```
+
+这里 `--laps 99` 的作用是不要因为完成几圈就提前停止，而是尽量跑满 `--timeout 300`
+秒。若希望完成指定圈数后自动停止，把 `--laps` 改成目标圈数即可。
+
+如果临时把 `--timeout` 改成 `150`，建议把 `--batch-name` 也同步改成：
+
+```text
+original_map_table_curvlimit_ramp_0p5_to_3p0_150s
+```
+
+这样后续看结果目录时不会把 150 秒测试误认为 300 秒测试。
+
+如果只需要自动统计和出图，可以加 `--disable-rviz` 关闭 RViz 渲染。若
+`tracker_evaluate.py` 失败，脚本会在对应 `evaluation/` 目录写入
+`evaluation_failed.txt`，并在 `logs/*_evaluator.log` 中保存失败原因，不再只留下空目录。
 
 #### 扫描时间估算
 
@@ -321,6 +448,33 @@ python3 -m lqr_sweep.validate_ros \
 code/outputs/sweep/
 ├── lqr_gain_table.yaml    # 速度-增益查找表（可直接用于控制器）
 └── sweep_summary.json     # 扫描元数据（耗时、网格配置、各速度点最优参数）
+```
+
+#### 低速航向优化 sweep
+
+如果原地图验证出现低速横向误差能通过、但航向误差偏大的情况，可以使用低速航向优化
+profile。该 profile 会提高 `mean/p95(e_psi)` 在目标函数中的权重，并默认使用
+`q_heading=2.0~12.0`、`R=3.0~15.0`，避免低速段总选到过低航向权重和过保守转向。
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros/code
+python3 -m lqr_sweep.run_sweep --mode full \
+  --map-path /sim_ws/src/f1tenth_gym_ros/maps/stadium_3ms_open \
+  --trajectory-csv /sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/stadium_3ms_trajectory.csv \
+  --speeds 0.5 0.625 0.75 0.875 1.0 \
+  --coarse-grid 5,4,5,3 \
+  --laps 3 \
+  --max-sim-time 420 \
+  --disable-curvature-speed-limit \
+  --disable-speed-ramp \
+  --objective-profile low-speed-heading \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium_low_speed_heading
+```
+
+如果需要更明确地限制搜索范围，也可以手动覆盖：
+
+```bash
+--q-heading-range 2.0,12.0 --r-steering-range 3.0,15.0
 ```
 
 ### RViz 可视化
