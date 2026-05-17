@@ -745,8 +745,9 @@ class LqrController(Node):
             if 1e-4 <= measured_dt <= 0.5:
                 dt = measured_dt
 
+        lqr_model_speed = max(v_actual, self.current_speed_cmd, self.lqr_min_model_speed)
         if self.gain_table is not None:
-            interp = self.gain_table.interpolate(max(v_actual, self.target_speed))
+            interp = self.gain_table.interpolate(lqr_model_speed)
             q_lat = interp.q_lateral
             q_head = interp.q_heading
             r_steer = interp.r_steering
@@ -761,7 +762,7 @@ class LqrController(Node):
             lateral_error=lateral_error,
             heading_error=heading_error,
             curvature_ref=sample.curvature,
-            speed=max(v_actual, self.target_speed),
+            speed=lqr_model_speed,
             wheelbase=self.wheelbase,
             dt=dt,
             min_model_speed=self.lqr_min_model_speed,

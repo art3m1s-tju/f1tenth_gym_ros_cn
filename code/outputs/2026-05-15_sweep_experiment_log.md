@@ -1505,3 +1505,67 @@ code/outputs/evaluation_ros/stage2_preview1p0_no_rate_limit_clean_100s/clean
 - 如果 3.0m/s 的 `p95 e_y/max e_y` 仍不满足，再跑 `max_lateral_accel=2.5`；
 - 目标是让 3.0m/s 在不触发转角饱和的前提下，把 `p95 e_y` 压回 5cm 左右；
 - 如果速度规划压低后仍不够，再考虑增大曲率预瞄距离到 `1.5m`。
+
+### 2026-05-17 Stage2 `max_lateral_accel=3.0` 验证结果与速度一致性修复
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_preview1p0_no_rate_limit_alat3p0_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.0m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- 噪声：clean
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 1.03 cm | 2.08 cm | 2.56 cm | 2.76 deg | 5.17 deg | 25.0 deg/s | 56.7 deg/s | 17.95 deg | 0.0% |
+| 2.5 | 2.68 cm | 5.07 cm | 5.65 cm | 2.66 deg | 4.75 deg | 29.9 deg/s | 71.2 deg/s | 18.50 deg | 0.0% |
+| 3.0 | 4.00 cm | 7.30 cm | 7.96 cm | 2.64 deg | 4.74 deg | 35.8 deg/s | 84.2 deg/s | 19.28 deg | 0.0% |
+
+与 `max_lateral_accel=3.5`、rate limit 关闭对比：
+
+- 3.0m/s 平均速度降低：`v_actual mean≈2.25 -> 2.11m/s`；
+- 3.0m/s steering rate 略降：`steering_rate_rms≈39.9 -> 35.8deg/s`；
+- 但横向误差变差：`p95 e_y≈6.59 -> 7.30cm`，`max e_y≈7.21 -> 7.96cm`；
+- `delta_raw/delta_cmd` 幅值几乎没有改善，`p95_abs_delta_cmd≈17deg`。
+
+分析：
+
+单纯降低 `max_lateral_accel` 没有改善跟踪，说明问题不只是“速度太快”。检查控制器发现：
+在线曲率限速降低了 `v_cmd/v_actual`，但 LQR 内部仍使用
+`max(v_actual, target_speed)` 做模型速度和 gain table 插值。也就是说目标速度为 `3.0m/s`
+时，即使弯道里实际只跑约 `2.1m/s`，LQR 仍按 `3.0m/s` 的模型和表参数计算。
+
+这会导致速度规划和 LQR 控制不一致：
+
+- 速度规划认为车已降速；
+- LQR 仍按高速模型求反馈增益；
+- 降低 `max_lateral_accel` 后，车辆更慢，但控制器参数没有同步到低速段；
+- 因此横向误差没有变好，反而可能因为相位/模型不匹配变差。
+
+代码修复：
+
+- `controller.py` 中新增本周期 LQR 模型速度：
+
+```text
+lqr_model_speed = max(v_actual, current_speed_cmd, lqr_min_model_speed)
+```
+
+- gain table 插值从原来的 `max(v_actual, target_speed)` 改为 `lqr_model_speed`；
+- `compute_lqr_steering()` 的 `speed` 也改为 `lqr_model_speed`；
+- 这样当 3.0m/s 目标速度因曲率限速降到约 2.0m/s 时，LQR 会按约 2.0m/s 的模型和表参数计算。
+
+下一步需要重新验证：
+
+1. 重新跑 `max_lateral_accel=3.5`、rate limit 关闭，确认速度一致性修复后的基线；
+2. 再跑 `max_lateral_accel=3.0`，看保守速度规划是否开始真正改善误差；
+3. 若仍不够，再测试 `lookahead=1.5m`，而不是恢复硬 steering rate limit。

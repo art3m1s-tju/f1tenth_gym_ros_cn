@@ -486,8 +486,31 @@ python3 -m lqr_sweep.validate_ros \
   --batch-name stage2_preview1p0_no_rate_limit_clean_100s
 ```
 
-如果关掉 rate limit 后 `steering_rate` 反而下降，说明前一轮锯齿主要来自硬限幅；然后保持
-rate limit 关闭，进一步测试更保守的曲率速度规划：
+如果关掉 rate limit 后 `steering_rate` 反而下降，说明前一轮锯齿主要来自硬限幅。Stage2
+后续还修复了一个速度一致性问题：曲率限速降低 `v_cmd/v_actual` 后，LQR 模型速度和 lookup table
+插值也会跟随实际/命令速度，而不是继续按 `target_speed` 计算。因此改完代码后先重跑
+`max_lateral_accel=3.5` 作为新基线：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.5 \
+  --curvature-speed-lookahead-m 1.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile clean \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_speed_consistent_preview1p0_no_rate_limit_alat3p5_clean_100s
+```
+
+然后保持 rate limit 关闭，测试更保守的曲率速度规划：
 
 ```bash
 python3 -m lqr_sweep.validate_ros \
@@ -505,7 +528,7 @@ python3 -m lqr_sweep.validate_ros \
   --noise-profile clean \
   --disable-rviz \
   --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
-  --batch-name stage2_preview1p0_no_rate_limit_alat3p0_clean_100s
+  --batch-name stage2_speed_consistent_preview1p0_no_rate_limit_alat3p0_clean_100s
 ```
 
 如果 `3.0m/s` 仍然频繁打满转角，再试 `max_lateral_accel=2.5`：
