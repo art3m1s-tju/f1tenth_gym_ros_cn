@@ -1455,3 +1455,53 @@ python3 -m lqr_sweep.validate_ros \
 - 如果关掉 rate limit 后转角也很糟，说明根因主要是轨迹/QR/速度上限本身太激进；
 - 只有当速度规划已足够保守但转角仍有高频抖动时，再考虑把硬 slew-rate limiter 改成
   一阶转向执行器模型或低通滤波器。
+
+### 2026-05-17 Stage2 no-rate-limit 对照验证结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_preview1p0_no_rate_limit_clean_100s/clean
+```
+
+验证配置：
+
+- 速度点：`1.5, 2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- 速度 ramp：开启，`max_accel=1.0m/s^2`, `max_decel=3.0m/s^2`
+- steering rate limit：关闭
+- 噪声：clean
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rms | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|-------------:|------------------:|------------------:|----------:|----------:|
+| 1.5 | 1.44 cm | 2.39 cm | 2.66 cm | 3.31 deg | 6.21 deg | 9.94 deg | 18.2 deg/s | 40.2 deg/s | 17.45 deg | 0.0% |
+| 2.0 | 0.84 cm | 2.04 cm | 2.49 cm | 2.60 deg | 4.89 deg | 10.24 deg | 25.6 deg/s | 57.7 deg/s | 18.44 deg | 0.0% |
+| 2.5 | 2.17 cm | 4.32 cm | 4.99 cm | 2.41 deg | 4.37 deg | 10.68 deg | 33.6 deg/s | 79.0 deg/s | 19.39 deg | 0.0% |
+| 3.0 | 3.45 cm | 6.59 cm | 7.21 cm | 2.35 deg | 4.33 deg | 10.77 deg | 39.9 deg/s | 97.1 deg/s | 19.60 deg | 0.0% |
+
+和上一轮 `max_steering_rate=2.0rad/s` 硬限幅对比：
+
+- 3.0m/s 的 `steering_rate_rms` 从约 `104.6deg/s` 降到 `39.9deg/s`；
+- 3.0m/s 的 steering saturation ratio 从约 `5.7%` 降到 `0.0%`；
+- 3.0m/s 的航向误差改善：`p95 e_psi` 从约 `6.25deg` 降到 `4.33deg`；
+- 但 3.0m/s 横向误差变差：`p95 e_y` 从约 `5.79cm` 上升到 `6.59cm`，
+  `max e_y` 仍约 `7.2cm`；
+- 2.5m/s 基本可接受但已接近边界：`max e_y=4.99cm`。
+
+结论：
+
+1. 硬 steering rate limiter 是上一轮锯齿和高 `steering_rate_rms` 的主要来源；
+2. 当前阶段不建议继续使用简单 slew-rate limiter；
+3. 关闭 rate limit 后转角波形明显健康，且没有转角饱和，但 3.0m/s 横向误差仍偏大；
+4. `2.5m/s` 可以作为目前较稳的上限候选，`3.0m/s` 还不能直接上实车；
+5. 下一步应优先调速度规划，而不是调 Q/R 或继续加硬转角限幅。
+
+下一步执行：
+
+- 先跑 `max_lateral_accel=3.0`、rate limit 关闭；
+- 如果 3.0m/s 的 `p95 e_y/max e_y` 仍不满足，再跑 `max_lateral_accel=2.5`；
+- 目标是让 3.0m/s 在不触发转角饱和的前提下，把 `p95 e_y` 压回 5cm 左右；
+- 如果速度规划压低后仍不够，再考虑增大曲率预瞄距离到 `1.5m`。
