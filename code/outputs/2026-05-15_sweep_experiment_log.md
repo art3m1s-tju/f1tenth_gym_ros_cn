@@ -1976,3 +1976,90 @@ python3 -m lqr_sweep.validate_ros \
   `60ms` 延迟导致的闭环相位滞后，需要单独用更保守速度规划、增大曲率预瞄或延迟补偿处理；
 - 若滤波后 clean/noise 跟踪误差变差明显，说明 alpha 过小，下一轮应试
   `alpha_y=0.40`、`alpha_psi=0.35`。
+
+### 2026-05-17 Stage2 light noise + error filter 结果
+
+本轮测试路径：
+
+```text
+code/outputs/evaluation_ros/stage2_filter_light_alphaY0p30_alphaPsi0p25_100s/noisy_light_pos2cm_yaw1deg_delay60ms
+```
+
+配置：
+
+- `noise-profile = light`
+  - position noise: `2cm`
+  - yaw noise: `1deg`
+  - pose delay: `60ms`
+- `max_lateral_accel = 3.5m/s^2`
+- `curvature_speed_lookahead_m = 1.0m`
+- steering rate limiter: disabled
+- error filter enabled:
+  - `alpha_y = 0.30`
+  - `alpha_psi = 0.25`
+
+#### 结果摘要
+
+| speed | mean e_y | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------:|---------:|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| 2.0m/s | 1.76cm | 4.20cm | 6.57cm | 6.23deg | 131.9deg/s | 263.4deg/s | 0.35% | 90.8deg/s |
+| 2.5m/s | 2.33cm | 5.76cm | 12.24cm | 9.25deg | 142.8deg/s | 291.8deg/s | 5.67% | 102.3deg/s |
+| 3.0m/s | 2.54cm | 6.04cm | 12.18cm | 10.99deg | 150.1deg/s | 307.1deg/s | 7.93% | 106.1deg/s |
+
+#### 与未滤波 full-light 的 3.0m/s 对比
+
+| case | p95 e_y | max e_y | p95 e_psi | steering_rate_rms | steering_rate_p95 | steering sat | yaw_rate_rms |
+|------|--------:|--------:|----------:|------------------:|------------------:|-------------:|-------------:|
+| clean baseline | 2.13cm | 2.62cm | 4.97deg | 33.9deg/s | 80.8deg/s | 0.00% | 98.9deg/s |
+| light, no filter | 6.28cm | 13.94cm | 10.57deg | 625.9deg/s | 1281.8deg/s | 7.51% | 106.6deg/s |
+| light, error filter | 6.04cm | 12.18cm | 10.99deg | 150.1deg/s | 307.1deg/s | 7.93% | 106.1deg/s |
+
+#### 判断
+
+1. 误差低通滤波是有效的：3.0m/s 下 `steering_rate_rms` 从 `625.9deg/s`
+   降到 `150.1deg/s`，`steering_rate_p95` 从 `1281.8deg/s` 降到
+   `307.1deg/s`。
+
+2. 但滤波没有解决高阶稳定性问题：
+   - `p95 e_psi` 仍约 `11deg`；
+   - `steering_saturation_ratio` 仍约 `7.9%`；
+   - `max e_y` 仍超过 `12cm`；
+   - `yaw_rate_rms` 与未滤波 light 基本相同。
+
+3. 关于 yaw rate：
+   clean baseline 在 3.0m/s 下 `yaw_rate_rms` 也接近 `99deg/s`，说明赛道曲率和
+   速度规划本身已经要求较高车身转动速度。filtered light 的 `yaw_rate_rms≈106deg/s`
+   不是最主要的新增问题，真正危险的是：
+   - 噪声 + 延迟下航向误差变大；
+   - 转角接近饱和的时间比例较高；
+   - `steering_rate_p95≈307deg/s` 对实车仍然偏激进。
+
+4. 当前 3.0m/s noisy-light 不建议直接上实车。更合理的下一步不是继续单纯加滤波，而是让速度规划更保守：
+   - 先把 `max_lateral_accel` 从 `3.5` 降到 `3.0` 或 `2.5`；
+   - 或把曲率预瞄从 `1.0m` 增大到 `1.5m`；
+   - 目标是降低弯前速度、降低转角饱和比例和 `p95 e_psi`。
+
+下一轮建议测试：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode batch \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speeds 2.0 2.5 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 1.5 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --disable-rviz \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros \
+  --batch-name stage2_filter_light_preview1p5_alat3p0_alphaY0p30_alphaPsi0p25_100s
+```
