@@ -1783,3 +1783,61 @@ python3 -m lqr_sweep.validate_ros \
 - 若 position-only 明显恶化：优先滤波 `(x,y)` 或投影后的 `e_y`；
 - 若 heading-only 明显恶化：优先滤波 yaw 或 `e_psi`，并检查真实系统 yaw 来源；
 - 若单项都不严重但 light 叠加后严重：说明扰动存在耦合，先做轻量误差低通，再逐步叠加验证。
+
+### 2026-05-17 Stage2 heading-only 1deg ablation 结果
+
+运行目录：
+
+```text
+code/outputs/evaluation_ros/stage2_ablation_yaw1deg_alat3p5_clean_100s/noisy_clean_pos0cm_yaw1deg_delay0ms
+```
+
+验证配置：
+
+- 速度点：`2.0, 2.5, 3.0m/s`
+- 曲率预瞄：`1.0m`
+- `max_lateral_accel=3.5m/s^2`
+- steering rate limit：关闭
+- 位置噪声：`0cm`
+- 航向噪声：`1deg`
+- 位姿延迟：`0ms`
+
+评估摘要：
+
+| speed | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------:|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| 2.0 | 0.86 cm | 1.98 cm | 2.81 cm | 2.61 deg | 4.94 deg | 319.3 deg/s | 640.4 deg/s | 20.63 deg | 0.009% |
+| 2.5 | 0.96 cm | 2.23 cm | 3.04 cm | 2.48 deg | 4.98 deg | 414.4 deg/s | 836.1 deg/s | 20.63 deg | 0.005% |
+| 3.0 | 0.98 cm | 2.29 cm | 3.10 cm | 2.46 deg | 5.03 deg | 421.7 deg/s | 867.2 deg/s | 20.63 deg | 0.005% |
+
+与 clean 3.0m/s 对比：
+
+| 指标 | clean | heading-only |
+|------|------:|-------------:|
+| mean e_y | 0.89 cm | 0.98 cm |
+| p95 e_y | 2.13 cm | 2.29 cm |
+| max e_y | 2.62 cm | 3.10 cm |
+| mean e_psi | 2.37 deg | 2.46 deg |
+| p95 e_psi | 4.97 deg | 5.03 deg |
+| steering_rate_rms | 33.9 deg/s | 421.7 deg/s |
+| steering_rate_p95 | 80.8 deg/s | 867.2 deg/s |
+| max delta | 18.36 deg | 20.63 deg |
+| sat ratio | 0.0% | 0.005% |
+
+结论：
+
+1. `1deg` 航向噪声单独存在时，路径跟踪误差基本保持可接受；
+2. 但转角变化率显著恶化，3.0m/s 的 `steering_rate_rms` 从 `33.9deg/s` 增至
+   `421.7deg/s`，`p95` 从 `80.8deg/s` 增至 `867.2deg/s`；
+3. 说明 yaw / `e_psi` 噪声是转角高频抖动的重要来源；
+4. 由于 heading-only 下横向误差没有明显炸，light profile 中 `max e_y=13.94cm` 的大幅恶化
+   还需要 position-only 和 delay-only 结果来解释；
+5. 下一步应优先实现或测试 yaw/e_psi 低通滤波，但在决定滤波参数前仍需完成 position-only 和
+   delay-only 两组 ablation。
+
+初步工程判断：
+
+- 对航向反馈加轻量低通有必要；
+- 滤波对象优先考虑 `e_psi`，而不是直接滤 `delta_cmd`；
+- 不建议恢复硬 steering rate limiter，因为它会制造斜坡/锯齿；
+- 若 position/delay 也明显恶化，则需要同时对 `e_y` 和延迟做处理。
