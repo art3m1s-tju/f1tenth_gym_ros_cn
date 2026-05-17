@@ -1841,3 +1841,73 @@ code/outputs/evaluation_ros/stage2_ablation_yaw1deg_alat3p5_clean_100s/noisy_cle
 - 滤波对象优先考虑 `e_psi`，而不是直接滤 `delta_cmd`；
 - 不建议恢复硬 steering rate limiter，因为它会制造斜坡/锯齿；
 - 若 position/delay 也明显恶化，则需要同时对 `e_y` 和延迟做处理。
+
+### 2026-05-17 Stage2 position/delay/yaw ablation 总结
+
+三组 ablation 实际均已完成：
+
+- delay-only:
+  `code/outputs/evaluation_ros/stage2_ablation_delay60ms_alat3p5_clean_100s/noisy_clean_pos0cm_yaw0deg_delay60ms`
+- position-only:
+  `code/outputs/evaluation_ros/stage2_ablation_pos2cm_alat3p5_clean_100s/noisy_clean_pos2cm_yaw0deg_delay0ms`
+- heading-only:
+  `code/outputs/evaluation_ros/stage2_ablation_yaw1deg_alat3p5_clean_100s/noisy_clean_pos0cm_yaw1deg_delay0ms`
+
+#### 3.0m/s 对比表
+
+| case | mean e_y | p95 e_y | max e_y | mean e_psi | p95 e_psi | steering_rate_rms | steering_rate_p95 | max delta | sat ratio |
+|------|---------:|--------:|--------:|-----------:|----------:|------------------:|------------------:|----------:|----------:|
+| clean | 0.89 cm | 2.13 cm | 2.62 cm | 2.37 deg | 4.97 deg | 33.9 deg/s | 80.8 deg/s | 18.36 deg | 0.0% |
+| yaw 1deg only | 0.98 cm | 2.29 cm | 3.10 cm | 2.46 deg | 5.03 deg | 421.7 deg/s | 867.2 deg/s | 20.63 deg | 0.005% |
+| pos 2cm only | 1.00 cm | 2.32 cm | 3.32 cm | 2.50 deg | 5.14 deg | 524.1 deg/s | 1047.6 deg/s | 20.63 deg | 0.31% |
+| delay 60ms only | 2.22 cm | 5.34 cm | 8.08 cm | 3.82 deg | 10.53 deg | 79.1 deg/s | 189.0 deg/s | 20.63 deg | 5.79% |
+| light all | 2.53 cm | 6.28 cm | 13.94 cm | 4.06 deg | 10.57 deg | 625.9 deg/s | 1281.8 deg/s | 20.63 deg | 7.51% |
+
+#### 结论
+
+1. `1deg` yaw noise 和 `2cm` position noise 单独存在时，横向误差基本仍然可接受，
+   但 steering rate 会严重恶化：
+   - yaw-only 3.0m/s: `steering_rate_rms≈421.7deg/s`
+   - pos-only 3.0m/s: `steering_rate_rms≈524.1deg/s`
+   因此测量噪声主要表现为转角高频抖动。
+
+2. `60ms` delay 单独存在时，steering rate 没有像噪声项那样爆炸，但轨迹误差明显恶化：
+   - `p95 e_y≈5.34cm`
+   - `max e_y≈8.08cm`
+   - `p95 e_psi≈10.53deg`
+   - steering saturation ratio≈`5.79%`
+   因此延迟主要损害闭环稳定裕度和跟踪误差。
+
+3. full light 是三者叠加后的耦合结果：
+   - 噪声项负责把 `delta_cmd` 打成高频；
+   - delay 负责让真实轨迹偏离更大；
+   - 组合后出现 `max e_y≈13.94cm` 和 `steering_rate_rms≈625.9deg/s`。
+
+4. 修复方向不能只靠单一手段：
+   - 对 yaw / `e_psi` 和 position / `e_y` 加轻量低通，用来压测量噪声；
+   - 对 delay，需要降低高速上限、增大预瞄或做延迟补偿；
+   - 不建议恢复硬 steering rate limiter，因为此前已验证它会制造锯齿/斜坡。
+
+#### 下一步工程计划
+
+先实现可开关的误差低通滤波：
+
+- `enable_error_filter`
+- `error_filter_alpha_y`
+- `error_filter_alpha_psi`
+
+建议初值：
+
+```text
+alpha_y = 0.25 ~ 0.35
+alpha_psi = 0.20 ~ 0.30
+```
+
+滤波对象优先选择已经投影后的 `e_y` 和 `e_psi`，而不是直接滤 `delta_cmd`。这样可以在进入
+LQR 反馈前抑制测量噪声，同时保留 LQR 的结构。
+
+完成滤波后验证顺序：
+
+1. yaw-only 和 pos-only，确认 steering rate 能否显著下降；
+2. full light，确认噪声叠加下是否仍可控；
+3. delay-only 若仍明显恶化，再单独测试 `lookahead=1.5m` 或降低 `max_lateral_accel`。
