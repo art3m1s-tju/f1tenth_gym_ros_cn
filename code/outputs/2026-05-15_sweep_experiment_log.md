@@ -2211,3 +2211,69 @@ enable_steering_rate_limit = false
    - 是否出现肉眼可见蛇形；
    - 入弯前是否减速过晚；
    - PlotJuggler 中 `delta_cmd` 和 `v_cmd/v_actual` 是否平滑。
+
+### 2026-05-17 Stage2 推荐基线记录与 RViz 极限检查计划
+
+经过 clean、light noise、单项噪声、误差滤波、速度预瞄和滤波 alpha 对比后，当前 Stage2
+推荐基线固定为：
+
+```text
+max_lateral_accel = 3.0m/s^2
+curvature_speed_lookahead_m = 2.0m
+enable_error_filter = true
+error_filter_alpha_y = 0.30
+error_filter_alpha_psi = 0.25
+enable_steering_rate_limit = false
+```
+
+选择理由：
+
+- 相比 `lookahead=1.5m`，`lookahead=2.0m` 在 noisy-light 下进一步降低了 3.0m/s 的
+  `p95 e_psi`、`max e_psi`、steering saturation ratio 和 yaw rate；
+- 更快滤波 `alpha=0.40/0.35` 会让 `steering_rate` 明显变差，因此不作为当前基线；
+- 硬 steering rate limiter 已验证会制造斜坡/锯齿，因此继续关闭。
+
+下一步先做一次极限 RViz 肉眼检查，而不是继续盲目扫参数。测试条件为：
+
+- `target speed = 3.0m/s`
+- `noise-profile = light`
+- 推荐基线速度规划和误差滤波
+- RViz 开启
+
+命令：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode single \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 2.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/stage2_rviz_limit_baseline_v3p0_light
+```
+
+肉眼检查重点：
+
+1. 入弯前是否提前降速；
+2. `delta_cmd` 是否长时间贴近 `±0.36rad`；
+3. 是否有连续蛇形或左右摆动；
+4. 是否有明显贴墙、切弯过深或出弯外抛；
+5. PlotJuggler 中 `v_cmd/v_actual`、`delta_cmd`、`e_y/e_psi` 是否在弯道周期性恶化。
+
+后续决策：
+
+- 如果 RViz 3.0m/s 看起来稳定，再跑一次 clean/noise 推荐基线完整 batch，作为 Stage2 收尾验证；
+- 如果 3.0m/s 仍然肉眼紧张，Stage2 不继续追求仿真 3.0m/s，实车建议先以 `2.0~2.5m/s`
+  作为安全上限；
+- 下一阶段重点应转向实车前准备：实车低速验证流程、日志字段、急停/遥控接管、真实延迟和定位噪声测量。

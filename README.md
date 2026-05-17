@@ -669,6 +669,48 @@ python3 -m lqr_sweep.validate_ros \
 如果 delay-only 就明显变差，优先处理延迟补偿、降低高速上限或增大曲率预瞄；如果 position-only
 明显变差，优先滤波 `x/y` 或 `e_y`；如果 heading-only 明显变差，优先滤波 yaw 或 `e_psi`。
 
+Stage2 当前推荐基线：
+
+```text
+max_lateral_accel = 3.0
+curvature_speed_lookahead_m = 2.0
+enable_error_filter = true
+error_filter_alpha_y = 0.30
+error_filter_alpha_psi = 0.25
+enable_steering_rate_limit = false
+```
+
+极限 RViz 可视化检查用 `3.0m/s + light noise` 跑一组单次测试。这里故意不加
+`--disable-rviz`，用于肉眼观察高速入弯、减速时机、车身姿态、转角饱和和蛇形：
+
+```bash
+python3 -m lqr_sweep.validate_ros \
+  --mode single \
+  --table /sim_ws/src/f1tenth_gym_ros/code/outputs/sweep_stadium/lqr_gain_table.yaml \
+  --speed 3.0 \
+  --timeout 100 \
+  --laps 99 \
+  --min-speed 0.4 \
+  --max-lateral-accel 3.0 \
+  --curvature-speed-lookahead-m 2.0 \
+  --max-accel 1.0 \
+  --max-decel 3.0 \
+  --disable-steering-rate-limit \
+  --noise-profile light \
+  --noise-seed 42 \
+  --enable-error-filter \
+  --error-filter-alpha-y 0.30 \
+  --error-filter-alpha-psi 0.25 \
+  --output-dir /sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros/stage2_rviz_limit_baseline_v3p0_light
+```
+
+看 RViz 时重点观察：
+
+- 入弯前是否已经开始降速，而不是到了弯心才降；
+- `delta_cmd` 是否长时间贴近 `±0.36rad`；
+- 车尾/车头是否出现肉眼可见左右摆动；
+- 如果 3.0m/s 看起来紧张，实车首轮应从 `2.0m/s` 或 `2.5m/s` 开始。
+
 #### 扫描时间估算
 
 | 模式 | 速度点数 | 网格规模 | 预计耗时 |
