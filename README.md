@@ -11,12 +11,60 @@
 
 - Linux（推荐 Ubuntu 22.04）
 - Docker ≥ 20.10
-- [rocker](https://github.com/osrf/rocker)（`sudo apt install python3-rocker` 或 `pip install rocker`）
-- NVIDIA 显卡 + `nvidia-container-toolkit`（可选，无 N 卡去掉 `--nvidia` 参数即可）
+- [rocker](https://github.com/osrf/rocker)（用于带图形界面和 GPU 加速的容器运行工具）
+- NVIDIA 显卡 + `nvidia-container-toolkit`（可选，无 N 卡后续启动不加 `--nvidia` 参数即可）
 
+### 依赖安装指南 (Ubuntu)
+
+#### 1. 安装 Docker
 ```bash
-# 把当前用户加进 docker 组（免 sudo）
+# 1. 卸载旧版本（如果有）
+for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do sudo apt-get remove $pkg; done
+
+# 2. 设置 apt 仓库
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+# 3. 添加仓库到 apt 源
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+
+# 4. 安装最新版本 Docker
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# 5. 把当前用户加进 docker 组（免 sudo 运行 docker）
 sudo usermod -aG docker $USER && newgrp docker
+```
+
+#### 2. 安装 NVIDIA Container Toolkit (仅 N 卡需要)
+用于在 Docker 中透传 GPU 资源：
+```bash
+# 1. 配置仓库
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+  && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+# 2. 更新并安装
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+
+# 3. 配置 Docker 使用 NVIDIA 运行时并重启服务
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+#### 3. 安装 Rocker
+```bash
+sudo apt update
+sudo apt install python3-rocker -y
+# 或者使用 pip 安装： pip install rocker
 ```
 
 ---
