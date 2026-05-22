@@ -808,7 +808,9 @@ class LqrControllerNode : public rclcpp::Node {
 
     auto stamp = msg->header.stamp;
     if (stamp.sec == 0 && stamp.nanosec == 0) {
-      stamp = get_clock()->now().to_msg();
+      const auto now_ns = get_clock()->now().nanoseconds();
+      stamp.sec = static_cast<int32_t>(now_ns / 1000000000LL);
+      stamp.nanosec = static_cast<uint32_t>(now_ns % 1000000000LL);
     }
     const double stamp_sec =
         static_cast<double>(stamp.sec) + static_cast<double>(stamp.nanosec) * 1e-9;
