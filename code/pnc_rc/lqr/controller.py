@@ -43,6 +43,7 @@ from pnc_rc.lqr.math import (
     wrap_angle,
 )
 from pnc_rc.lqr.geometry import (
+    advance_projection_along_path,
     compute_curvature_limited_speed,
     interpolate_angle,
     project_to_path,
@@ -145,6 +146,7 @@ class LqrController(Node):
         # ---- LQR 核心参数 ----
         self.declare_parameter("control_dt", 0.05)
         self.declare_parameter("lqr_min_model_speed", 0.25)
+        self.declare_parameter("lqr_lookahead_distance_m", 1.5)
         self.declare_parameter("lqr_q_lateral", 3.0)
         self.declare_parameter("lqr_q_heading", 1.2)
         self.declare_parameter("lqr_r_steering", 8.0)
@@ -226,6 +228,10 @@ class LqrController(Node):
         self.lqr_min_model_speed = max(
             1e-4,
             float(self.get_parameter("lqr_min_model_speed").value),
+        )
+        self.lqr_lookahead_distance_m = max(
+            0.0,
+            float(self.get_parameter("lqr_lookahead_distance_m").value),
         )
         self.lqr_q_lateral = max(1e-9, float(self.get_parameter("lqr_q_lateral").value))
         self.lqr_q_heading = max(1e-9, float(self.get_parameter("lqr_q_heading").value))
@@ -321,6 +327,7 @@ class LqrController(Node):
             f"(path_topic={self.path_topic}, odom_topic={self.odom_topic}, "
             f"drive_topic={self.drive_topic}, use_tf_pose={self.use_tf_pose}, "
             f"target_speed={self.target_speed:.2f}, "
+            f"lqr_lookahead={self.lqr_lookahead_distance_m:.2f}m, "
             f"curvature_lookahead={self.curvature_speed_lookahead_m:.2f}m, "
             f"steering_rate_limit={self.enable_steering_rate_limit}"
             f"/{self.max_steering_rate:.2f}rad/s, "
@@ -483,11 +490,22 @@ class LqrController(Node):
         assert self.points is not None
         assert self.headings is not None
         assert self.curvatures is not None
+        assert self.segment_lengths is not None
         assert self.kdtree is not None
 
         proj = project_to_path(
             position, self.points, self.kdtree,
             self.headings, self.curvatures, self.path_closed_loop,
+        )
+        proj = advance_projection_along_path(
+            position=position,
+            projection=proj,
+            lookahead_distance=self.lqr_lookahead_distance_m,
+            points=self.points,
+            headings=self.headings,
+            curvatures=self.curvatures,
+            segment_lengths=self.segment_lengths,
+            closed_loop=self.path_closed_loop,
         )
         return ReferenceSample(
             point=proj.point,

@@ -70,6 +70,8 @@ def parse_args() -> argparse.Namespace:
                    help="Maximum simulated seconds per candidate; auto-estimated when omitted")
     p.add_argument("--max-lateral-accel", type=float, default=4.0,
                    help="Maximum lateral acceleration used by curvature speed limit")
+    p.add_argument("--lqr-lookahead-distance-m", type=float, default=1.5,
+                   help="Forward path distance used for LQR control error preview")
     p.add_argument("--disable-curvature-speed-limit", action="store_true",
                    help="Disable curvature speed limiting for constant-speed sweeps")
     p.add_argument("--max-accel", type=float, default=1.0,
@@ -140,6 +142,7 @@ def main() -> None:
         max_sim_time=max_sim_time,
         lap_count=args.laps,
         max_lateral_accel=args.max_lateral_accel,
+        lqr_lookahead_distance_m=args.lqr_lookahead_distance_m,
         enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
         enable_speed_ramp=not args.disable_speed_ramp,
         max_accel=args.max_accel,
@@ -236,6 +239,7 @@ def main() -> None:
         "lap_count": args.laps,
         "max_sim_time": max_sim_time,
         "max_lateral_accel": args.max_lateral_accel,
+        "lqr_lookahead_distance_m": args.lqr_lookahead_distance_m,
         "enable_curvature_speed_limit": not args.disable_curvature_speed_limit,
         "enable_speed_ramp": not args.disable_speed_ramp,
         "max_accel": args.max_accel,

@@ -66,6 +66,7 @@ def run_ros_validation(
     min_speed: float = 0.4,
     max_lateral_accel: float = 4.0,
     max_steering_angle: float = 0.36,
+    lqr_lookahead_distance_m: float = 1.5,
     use_tf_pose: bool = False,
     enable_curvature_speed_limit: bool = True,
     curvature_speed_lookahead_m: float = 1.0,
@@ -99,6 +100,7 @@ def run_ros_validation(
         min_speed: 曲率限速后的最低速度。
         max_lateral_accel: 曲率限速使用的横向加速度上限。
         max_steering_angle: 最大前轮转角。
+        lqr_lookahead_distance_m: LQR 控制误差使用的前向预瞄距离。
         use_tf_pose: 是否用 TF 查询车辆位姿；默认关闭，直接用 odom 位姿。
         enable_curvature_speed_limit: 是否启用曲率限速。
         enable_speed_ramp: 是否启用速度斜坡。
@@ -131,6 +133,7 @@ def run_ros_validation(
         f"min_speed:={min_speed}",
         f"max_lateral_accel:={max_lateral_accel}",
         f"max_steering_angle:={max_steering_angle}",
+        f"lqr_lookahead_distance_m:={lqr_lookahead_distance_m}",
         f"use_tf_pose:={str(use_tf_pose).lower()}",
         f"enable_curvature_speed_limit:={str(enable_curvature_speed_limit).lower()}",
         f"curvature_speed_lookahead_m:={curvature_speed_lookahead_m}",
@@ -159,6 +162,7 @@ def run_ros_validation(
     print(
         "  Speed handling: "
         f"curvature_limit={enable_curvature_speed_limit}, "
+        f"lqr_lookahead={lqr_lookahead_distance_m:.2f}m, "
         f"lookahead={curvature_speed_lookahead_m:.2f}m, "
         f"speed_ramp={enable_speed_ramp}, "
         f"min_speed={min_speed}, max_lat_accel={max_lateral_accel}"
@@ -347,6 +351,7 @@ def run_batch_ros_validation(
     min_speed: float,
     max_lateral_accel: float,
     max_steering_angle: float,
+    lqr_lookahead_distance_m: float,
     use_tf_pose: bool,
     enable_curvature_speed_limit: bool,
     curvature_speed_lookahead_m: float,
@@ -390,6 +395,7 @@ def run_batch_ros_validation(
                 "timeout_s",
                 "laps",
                 "curvature_limit",
+                "lqr_lookahead_distance_m",
                 "curvature_speed_lookahead_m",
                 "speed_ramp",
                 "max_lateral_accel",
@@ -441,6 +447,7 @@ def run_batch_ros_validation(
                 min_speed=min_speed,
                 max_lateral_accel=max_lateral_accel,
                 max_steering_angle=max_steering_angle,
+                lqr_lookahead_distance_m=lqr_lookahead_distance_m,
                 use_tf_pose=use_tf_pose,
                 enable_curvature_speed_limit=enable_curvature_speed_limit,
                 curvature_speed_lookahead_m=curvature_speed_lookahead_m,
@@ -471,6 +478,7 @@ def run_batch_ros_validation(
                     f"{timeout_seconds:.1f}",
                     lap_count,
                     int(enable_curvature_speed_limit),
+                    f"{lqr_lookahead_distance_m:.3f}",
                     f"{curvature_speed_lookahead_m:.3f}",
                     int(enable_speed_ramp),
                     f"{max_lateral_accel:.3f}",
@@ -529,6 +537,12 @@ if __name__ == "__main__":
     p.add_argument("--min-speed", type=float, default=0.4)
     p.add_argument("--max-lateral-accel", type=float, default=4.0)
     p.add_argument("--max-steering-angle", type=float, default=0.36)
+    p.add_argument(
+        "--lqr-lookahead-distance-m",
+        type=float,
+        default=1.5,
+        help="Forward path distance used for LQR control error preview.",
+    )
     p.add_argument("--use-tf-pose", action="store_true")
     p.add_argument(
         "--curvature-speed-lookahead-m",
@@ -634,6 +648,7 @@ if __name__ == "__main__":
             min_speed=args.min_speed,
             max_lateral_accel=args.max_lateral_accel,
             max_steering_angle=args.max_steering_angle,
+            lqr_lookahead_distance_m=args.lqr_lookahead_distance_m,
             use_tf_pose=args.use_tf_pose,
             enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
             curvature_speed_lookahead_m=args.curvature_speed_lookahead_m,
@@ -666,6 +681,7 @@ if __name__ == "__main__":
             min_speed=args.min_speed,
             max_lateral_accel=args.max_lateral_accel,
             max_steering_angle=args.max_steering_angle,
+            lqr_lookahead_distance_m=args.lqr_lookahead_distance_m,
             use_tf_pose=args.use_tf_pose,
             enable_curvature_speed_limit=not args.disable_curvature_speed_limit,
             curvature_speed_lookahead_m=args.curvature_speed_lookahead_m,

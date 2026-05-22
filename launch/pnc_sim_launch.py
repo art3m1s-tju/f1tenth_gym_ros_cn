@@ -27,6 +27,7 @@ def generate_launch_description():
         DeclareLaunchArgument('lqr_q_heading', default_value='1.2'),
         DeclareLaunchArgument('lqr_r_steering', default_value='8.0'),
         DeclareLaunchArgument('lqr_feedforward_gain', default_value='1.0'),
+        DeclareLaunchArgument('lqr_lookahead_distance_m', default_value='1.5'),
         DeclareLaunchArgument('lqr_gain_table_path', default_value=''),
         DeclareLaunchArgument('max_lateral_accel', default_value='4.0'),
         DeclareLaunchArgument('max_steering_angle', default_value='0.36'),
@@ -121,6 +122,7 @@ def generate_launch_description():
         q_head = LaunchConfiguration('lqr_q_heading').perform(context)
         r_steer = LaunchConfiguration('lqr_r_steering').perform(context)
         ff_gain = LaunchConfiguration('lqr_feedforward_gain').perform(context)
+        lqr_lookahead = LaunchConfiguration('lqr_lookahead_distance_m').perform(context)
         gain_table_path = LaunchConfiguration('lqr_gain_table_path').perform(context)
         max_lat_accel = LaunchConfiguration('max_lateral_accel').perform(context)
         max_steer = LaunchConfiguration('max_steering_angle').perform(context)
@@ -210,6 +212,7 @@ def generate_launch_description():
             '-p', f'lqr_q_heading:={q_head}',
             '-p', f'lqr_r_steering:={r_steer}',
             '-p', f'lqr_feedforward_gain:={ff_gain}',
+            '-p', f'lqr_lookahead_distance_m:={lqr_lookahead}',
             '-p', 'enable_tracking_csv_log:=true',
             '-p', f'tracking_log_path:={log_path}',
         ]

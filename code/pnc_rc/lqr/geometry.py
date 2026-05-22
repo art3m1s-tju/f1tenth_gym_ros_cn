@@ -98,3 +98,99 @@ def project_to_path(
         segment_t=best_t,
         closest_idx=closest_idx,
     )
+
+
+def advance_projection_along_path(
+    position: np.ndarray,
+    projection: PathProjection,
+    lookahead_distance: float,
+    points: np.ndarray,
+    headings: np.ndarray,
+    curvatures: np.ndarray,
+    segment_lengths: np.ndarray,
+    closed_loop: bool = True,
+) -> PathProjection:
+    """Move a path projection forward and recompute error at the preview point."""
+    if lookahead_distance <= 1e-9 or len(points) < 2:
+        return projection
+
+    point_count = len(points)
+    segment_count = point_count if closed_loop else point_count - 1
+    if segment_count <= 0:
+        return projection
+
+    segment_idx = int(np.clip(projection.segment_idx, 0, segment_count - 1))
+    segment_t = float(np.clip(projection.segment_t, 0.0, 1.0))
+    distance_left = lookahead_distance
+
+    while distance_left > 1e-9:
+        segment_length = float(segment_lengths[segment_idx])
+        if segment_length <= 1e-9:
+            next_segment = _next_segment_index(segment_idx, segment_count, closed_loop)
+            if next_segment == segment_idx:
+                break
+            segment_idx = next_segment
+            segment_t = 0.0
+            continue
+
+        remaining_segment = (1.0 - segment_t) * segment_length
+        if remaining_segment <= 1e-9:
+            next_segment = _next_segment_index(segment_idx, segment_count, closed_loop)
+            if next_segment == segment_idx:
+                segment_t = 1.0
+                break
+            segment_idx = next_segment
+            segment_t = 0.0
+            continue
+
+        if distance_left <= remaining_segment:
+            segment_t = min(1.0, segment_t + distance_left / segment_length)
+            break
+
+        distance_left -= remaining_segment
+        next_segment = _next_segment_index(segment_idx, segment_count, closed_loop)
+        if next_segment == segment_idx:
+            segment_t = 1.0
+            break
+        segment_idx = next_segment
+        segment_t = 0.0
+
+    next_idx = (segment_idx + 1) % point_count
+    if not closed_loop:
+        next_idx = min(segment_idx + 1, point_count - 1)
+
+    start = points[segment_idx]
+    end = points[next_idx]
+    preview_point = start + segment_t * (end - start)
+    preview_heading = interpolate_angle(
+        float(headings[segment_idx]),
+        float(headings[next_idx]),
+        segment_t,
+    )
+    preview_curvature = float(
+        (1.0 - segment_t) * curvatures[segment_idx]
+        + segment_t * curvatures[next_idx]
+    )
+    normal = np.array([-math.sin(preview_heading), math.cos(preview_heading)])
+    lateral_error = float((position - preview_point) @ normal)
+    closest_idx = segment_idx if segment_t < 0.5 else next_idx
+
+    return PathProjection(
+        point=preview_point,
+        heading=preview_heading,
+        curvature=preview_curvature,
+        lateral_error=lateral_error,
+        segment_idx=segment_idx,
+        segment_t=segment_t,
+        closest_idx=closest_idx,
+    )
+
+
+def _next_segment_index(
+    segment_idx: int,
+    segment_count: int,
+    closed_loop: bool,
+) -> int:
+    if closed_loop:
+        return (segment_idx + 1) % segment_count
+    return min(segment_idx + 1, segment_count - 1)

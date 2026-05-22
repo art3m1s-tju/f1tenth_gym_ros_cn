@@ -19,7 +19,11 @@ from pnc_rc.lqr.math import (
     compute_path_curvatures,
     wrap_angle,
 )
-from pnc_rc.lqr.geometry import compute_curvature_limited_speed, project_to_path
+from pnc_rc.lqr.geometry import (
+    advance_projection_along_path,
+    compute_curvature_limited_speed,
+    project_to_path,
+)
 from lqr_sweep.lookup_table import LqrParams
 
 
@@ -43,6 +47,7 @@ class SimConfig:
         max_sim_time: 单次仿真的最大允许时间。
         lap_count: 需要连续完成的圈数。
         lqr_min_model_speed: LQR 线性模型使用的最低速度。
+        lqr_lookahead_distance_m: LQR 控制误差使用的前向预瞄距离。
         steering_delay_steps: 转向执行延迟步数；1 表示当前周期执行上一周期的转向命令。
         position_noise_std: 位置观测高斯噪声标准差，单位为米。
         heading_noise_std: 航向观测高斯噪声标准差，单位为弧度。
@@ -63,6 +68,7 @@ class SimConfig:
     max_sim_time: float = 120.0
     lap_count: int = 5
     lqr_min_model_speed: float = 0.25
+    lqr_lookahead_distance_m: float = 1.5
     steering_delay_steps: int = 1
     position_noise_std: float = 0.005
     heading_noise_std: float = 0.005
@@ -236,6 +242,15 @@ def run_single_sim(
 
             noisy_position = np.array([x_noisy, y_noisy])
             control_proj = project_to_path(noisy_position, points, kdtree, headings, curvatures)
+            control_proj = advance_projection_along_path(
+                position=noisy_position,
+                projection=control_proj,
+                lookahead_distance=config.lqr_lookahead_distance_m,
+                points=points,
+                headings=headings,
+                curvatures=curvatures,
+                segment_lengths=segment_lengths,
+            )
             control_heading_error = wrap_angle(theta_noisy - control_proj.heading)
 
             truth_proj = project_to_path(position, points, kdtree, headings, curvatures)
