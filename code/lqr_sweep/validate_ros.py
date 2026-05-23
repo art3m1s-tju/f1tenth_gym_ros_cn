@@ -54,8 +54,59 @@ def _count_laps_from_log(log_path: Path, start_x: float, start_y: float, thresho
         return 0
 
 
+def _load_xy_csv(csv_path: str | Path) -> list[tuple[float, float]]:
+    with open(csv_path, "r") as f:
+        return [(float(row["x"]), float(row["y"])) for row in csv.DictReader(f)]
+
+
+def _load_start_pose(csv_path: str | Path) -> tuple[float, float, float]:
+    with open(csv_path, "r") as f:
+        first = next(csv.DictReader(f))
+    return float(first["x"]), float(first["y"]), float(first.get("yaw", 0.0))
+
+
+def _nearest_index(x: float, y: float, points: list[tuple[float, float]]) -> int:
+    best_idx = 0
+    best_dist = float("inf")
+    for idx, (px, py) in enumerate(points):
+        dist = (x - px) * (x - px) + (y - py) * (y - py)
+        if dist < best_dist:
+            best_idx = idx
+            best_dist = dist
+    return best_idx
+
+
+def _count_laps_from_positions(
+    log_path: Path,
+    reference_points: list[tuple[float, float]],
+) -> int:
+    """Estimate laps by projecting logged vehicle positions onto the global path."""
+    if not log_path.exists() or len(reference_points) < 10:
+        return 0
+    try:
+        with open(log_path, "r") as f:
+            rows = list(csv.DictReader(f))
+        if len(rows) < 500:
+            return 0
+
+        high_idx = 0.75 * (len(reference_points) - 1)
+        low_idx = 0.25 * (len(reference_points) - 1)
+        laps = 0
+        previous_idx = None
+        for row in rows:
+            x = float(row["x"])
+            y = float(row["y"])
+            idx = _nearest_index(x, y, reference_points)
+            if previous_idx is not None and previous_idx > high_idx and idx < low_idx:
+                laps += 1
+            previous_idx = idx
+        return laps
+    except (ValueError, IndexError, OSError):
+        return 0
+
+
 def run_ros_validation(
-    table_path: Path,
+    table_path: Path | None = None,
     target_speed: float = 1.0,
     output_dir: Path | None = None,
     track_csv: str = "/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/processed_track.csv",
@@ -64,9 +115,9 @@ def run_ros_validation(
     timeout_seconds: float = 90.0,
     lap_count: int = 5,
     min_speed: float = 0.4,
-    max_lateral_accel: float = 4.0,
+    max_lateral_accel: float = 2.0,
     max_steering_angle: float = 0.36,
-    lqr_lookahead_distance_m: float = 1.5,
+    lqr_lookahead_distance_m: float = 0.0,
     use_tf_pose: bool = False,
     enable_curvature_speed_limit: bool = True,
     curvature_speed_lookahead_m: float = 1.0,
@@ -82,9 +133,32 @@ def run_ros_validation(
     enable_error_filter: bool = False,
     error_filter_alpha_y: float = 0.30,
     error_filter_alpha_psi: float = 0.25,
+    trajectory_mode: str = "control_friendly",
+    centerline_smoothing: float = 5.0,
+    control_friendly_alpha: float = 0.56,
+    control_friendly_auto_alpha: bool = True,
+    control_friendly_smoothing: float = 2.0,
+    control_friendly_max_curvature: float = 1.0,
+    control_friendly_min_clearance: float = 0.35,
     launch_log_path: Path | None = None,
     evaluator_log_path: Path | None = None,
     enable_rviz: bool = True,
+    map_path: str | None = None,
+    map_yaml: str | None = None,
+    enable_st_corridor_avoidance: bool = False,
+    st_avoidance_max_speed: float = 1.0,
+    st_min_speed: float = 0.35,
+    st_lookahead_m: float = 5.0,
+    st_inflation_margin_m: float = 0.10,
+    st_min_border_clearance_m: float = 0.22,
+    st_max_lateral_offset_m: float = 0.65,
+    st_lateral_offset_step_m: float = 0.10,
+    st_takeover_distance_m: float = 0.0,
+    st_desired_obstacle_clearance_m: float = 0.12,
+    st_static_obstacle_manifest_path: str = "",
+    st_log_path: str = "/sim_ws/src/f1tenth_gym_ros/code/outputs/logs/st_corridor_log.csv",
+    collision_log_path: str = "/sim_ws/src/f1tenth_gym_ros/code/outputs/logs/collision_log.csv",
+    start_pose: tuple[float, float, float] | None = None,
 ) -> Path | None:
     """启动完整 ROS 仿真，等待完成目标圈数后运行评估脚本。
 
@@ -118,12 +192,17 @@ def run_ros_validation(
     log_file = Path(log_path)
     if log_file.exists():
         log_file.unlink()
+    st_log_file = Path(st_log_path)
+    if enable_st_corridor_avoidance and st_log_file.exists():
+        st_log_file.unlink()
+    collision_log_file = Path(collision_log_path)
+    if collision_log_file.exists():
+        collision_log_file.unlink()
 
-    # 轮询前只读取一次起点位置，后续用于判断是否回到起点附近。
-    with open(trajectory_csv) as f:
-        reader = csv.DictReader(f)
-        first = next(reader)
-        start_x, start_y = float(first["x"]), float(first["y"])
+    reference_points = _load_xy_csv(trajectory_csv)
+    start_x, start_y = reference_points[0]
+    if start_pose is None:
+        start_pose = _load_start_pose(trajectory_csv)
 
     launch_file = "/sim_ws/src/f1tenth_gym_ros/launch/pnc_sim_launch.py"
     launch_cmd = [
@@ -149,16 +228,54 @@ def run_ros_validation(
         f"enable_error_filter:={str(enable_error_filter).lower()}",
         f"error_filter_alpha_y:={error_filter_alpha_y}",
         f"error_filter_alpha_psi:={error_filter_alpha_psi}",
+        f"trajectory_mode:={trajectory_mode}",
+        f"centerline_smoothing:={centerline_smoothing}",
+        f"control_friendly_alpha:={control_friendly_alpha}",
+        f"control_friendly_auto_alpha:={str(control_friendly_auto_alpha).lower()}",
+        f"control_friendly_smoothing:={control_friendly_smoothing}",
+        f"control_friendly_max_curvature:={control_friendly_max_curvature}",
+        f"control_friendly_min_clearance:={control_friendly_min_clearance}",
         f"track_csv:={track_csv}",
         f"trajectory_csv:={trajectory_csv}",
         f"log_path:={log_path}",
-        f"lqr_gain_table_path:={table_path}",
+        f"enable_st_corridor_avoidance:={str(enable_st_corridor_avoidance).lower()}",
+        f"st_avoidance_max_speed:={st_avoidance_max_speed}",
+        f"st_min_speed:={st_min_speed}",
+        f"st_lookahead_m:={st_lookahead_m}",
+        f"st_inflation_margin_m:={st_inflation_margin_m}",
+        f"st_min_border_clearance_m:={st_min_border_clearance_m}",
+        f"st_max_lateral_offset_m:={st_max_lateral_offset_m}",
+        f"st_lateral_offset_step_m:={st_lateral_offset_step_m}",
+        f"st_takeover_distance_m:={st_takeover_distance_m}",
+        f"st_desired_obstacle_clearance_m:={st_desired_obstacle_clearance_m}",
+        f"st_log_path:={st_log_path}",
+        f"collision_log_path:={collision_log_path}",
+        f"sx:={start_pose[0]}",
+        f"sy:={start_pose[1]}",
+        f"stheta:={start_pose[2]}",
     ]
+    if st_static_obstacle_manifest_path:
+        launch_cmd.append(f"st_static_obstacle_manifest_path:={st_static_obstacle_manifest_path}")
+    if map_path:
+        launch_cmd.append(f"map_path:={map_path}")
+    if map_yaml:
+        launch_cmd.append(f"map_yaml:={map_yaml}")
+    if table_path is not None:
+        launch_cmd.append(f"lqr_gain_table_path:={table_path}")
 
     required_laps = max(1, int(lap_count))
     print(f"Launching ROS simulation (timeout={timeout_seconds}s, laps={required_laps})...")
-    print(f"  Table: {table_path}")
+    print(f"  Table: {table_path or '(none)'}")
     print(f"  Target speed: {target_speed}")
+    if map_path or map_yaml:
+        print(f"  Map override: path={map_path or '(default)'}, yaml={map_yaml or '(default)'}")
+    print(
+        "  ST corridor: "
+        f"enabled={enable_st_corridor_avoidance}, "
+        f"avoidance_max_speed={st_avoidance_max_speed}, "
+        f"min_speed={st_min_speed}, "
+        f"lookahead={st_lookahead_m}"
+    )
     print(
         "  Speed handling: "
         f"curvature_limit={enable_curvature_speed_limit}, "
@@ -203,7 +320,10 @@ def run_ros_validation(
     try:
         while time.time() - start_time < timeout_seconds:
             time.sleep(2.0)
-            completed_laps = _count_laps_from_log(log_file, start_x, start_y)
+            if enable_st_corridor_avoidance:
+                completed_laps = _count_laps_from_positions(log_file, reference_points)
+            else:
+                completed_laps = _count_laps_from_log(log_file, start_x, start_y)
             if completed_laps >= required_laps:
                 print(f"  {completed_laps} laps detected, stopping simulation...")
                 break
@@ -226,6 +346,18 @@ def run_ros_validation(
     if not log_file.exists():
         print("  ERROR: No log file produced.")
         return None
+    collision_events = 0
+    if collision_log_file.exists():
+        with collision_log_file.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            collision_events = sum(int(row.get("ego_collision", "0")) > 0 for row in reader)
+    if collision_events > 0:
+        failure_path = output_dir / "collision_detected.txt"
+        failure_path.write_text(
+            f"{collision_events} collision/done events were logged in {collision_log_file}\n",
+            encoding="utf-8",
+        )
+        print(f"  WARNING: collision/done log is not empty: {collision_log_file}")
 
     eval_cmd = [
         "python3", "/sim_ws/src/f1tenth_gym_ros/code/tracker_evaluate.py",
@@ -504,7 +636,7 @@ def run_batch_ros_validation(
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--table", required=True)
+    p.add_argument("--table", default=None)
     p.add_argument("--mode", choices=["single", "batch"], default="single")
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument(
@@ -535,12 +667,12 @@ if __name__ == "__main__":
         default="/sim_ws/src/f1tenth_gym_ros/code/outputs/logs/lqr_tracking_log.csv",
     )
     p.add_argument("--min-speed", type=float, default=0.4)
-    p.add_argument("--max-lateral-accel", type=float, default=4.0)
+    p.add_argument("--max-lateral-accel", type=float, default=2.0)
     p.add_argument("--max-steering-angle", type=float, default=0.36)
     p.add_argument(
         "--lqr-lookahead-distance-m",
         type=float,
-        default=1.5,
+        default=0.0,
         help="Forward path distance used for LQR control error preview.",
     )
     p.add_argument("--use-tf-pose", action="store_true")
@@ -621,6 +753,25 @@ if __name__ == "__main__":
         action="store_true",
         help="Run ROS validation without launching RViz.",
     )
+    p.add_argument("--map-path", default=None, help="Map path without extension for gym_bridge.")
+    p.add_argument("--map-yaml", default=None, help="Map YAML path for nav2 map_server.")
+    p.add_argument(
+        "--enable-st-corridor-avoidance",
+        action="store_true",
+        help="Enable the ST corridor local planner and make LQR track /local_trajectory.",
+    )
+    p.add_argument("--st-avoidance-max-speed", type=float, default=1.0)
+    p.add_argument("--st-min-speed", type=float, default=0.35)
+    p.add_argument("--st-lookahead-m", type=float, default=5.0)
+    p.add_argument("--st-static-obstacle-manifest-path", default="")
+    p.add_argument(
+        "--st-log-path",
+        default="/sim_ws/src/f1tenth_gym_ros/code/outputs/logs/st_corridor_log.csv",
+    )
+    p.add_argument(
+        "--collision-log-path",
+        default="/sim_ws/src/f1tenth_gym_ros/code/outputs/logs/collision_log.csv",
+    )
     p.add_argument("--max-accel", type=float, default=1.0)
     p.add_argument("--max-decel", type=float, default=2.0)
     args = p.parse_args()
@@ -633,6 +784,8 @@ if __name__ == "__main__":
     )
 
     if args.mode == "batch":
+        if not args.table:
+            raise SystemExit("--table is required when --mode batch is used")
         output_root = Path(args.output_dir) if args.output_dir else Path(
             "/sim_ws/src/f1tenth_gym_ros/code/outputs/evaluation_ros"
         )
@@ -670,7 +823,7 @@ if __name__ == "__main__":
     else:
         out = Path(args.output_dir) if args.output_dir else None
         run_ros_validation(
-            Path(args.table),
+            Path(args.table) if args.table else None,
             args.speed,
             out,
             track_csv=args.track_csv,
@@ -698,4 +851,13 @@ if __name__ == "__main__":
             error_filter_alpha_y=args.error_filter_alpha_y,
             error_filter_alpha_psi=args.error_filter_alpha_psi,
             enable_rviz=not args.disable_rviz,
+            map_path=args.map_path,
+            map_yaml=args.map_yaml,
+            enable_st_corridor_avoidance=args.enable_st_corridor_avoidance,
+            st_avoidance_max_speed=args.st_avoidance_max_speed,
+            st_min_speed=args.st_min_speed,
+            st_lookahead_m=args.st_lookahead_m,
+            st_static_obstacle_manifest_path=args.st_static_obstacle_manifest_path,
+            st_log_path=args.st_log_path,
+            collision_log_path=args.collision_log_path,
         )

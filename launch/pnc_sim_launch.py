@@ -7,6 +7,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.substitutions import Command
 from ament_index_python.packages import get_package_share_directory
 
@@ -17,19 +18,28 @@ def generate_launch_description():
     code_dir = '/sim_ws/src/f1tenth_gym_ros/code'
 
     config_dict = yaml.safe_load(open(sim_config, 'r'))
+    bridge_params = config_dict['bridge']['ros__parameters']
+    default_map_path = bridge_params['map_path']
+    default_map_img_ext = bridge_params['map_img_ext']
 
     # Declare launch arguments
     launch_args = [
         DeclareLaunchArgument('enable_rviz', default_value='true'),
+        DeclareLaunchArgument('map_path', default_value=default_map_path),
+        DeclareLaunchArgument('map_yaml', default_value=f'{default_map_path}.yaml'),
+        DeclareLaunchArgument('map_img_ext', default_value=default_map_img_ext),
+        DeclareLaunchArgument('sx', default_value=str(bridge_params['sx'])),
+        DeclareLaunchArgument('sy', default_value=str(bridge_params['sy'])),
+        DeclareLaunchArgument('stheta', default_value=str(bridge_params['stheta'])),
         DeclareLaunchArgument('target_speed', default_value='1.0'),
         DeclareLaunchArgument('min_speed', default_value='0.4'),
         DeclareLaunchArgument('lqr_q_lateral', default_value='3.0'),
         DeclareLaunchArgument('lqr_q_heading', default_value='1.2'),
         DeclareLaunchArgument('lqr_r_steering', default_value='8.0'),
         DeclareLaunchArgument('lqr_feedforward_gain', default_value='1.0'),
-        DeclareLaunchArgument('lqr_lookahead_distance_m', default_value='1.5'),
+        DeclareLaunchArgument('lqr_lookahead_distance_m', default_value='0.0'),
         DeclareLaunchArgument('lqr_gain_table_path', default_value=''),
-        DeclareLaunchArgument('max_lateral_accel', default_value='4.0'),
+        DeclareLaunchArgument('max_lateral_accel', default_value='2.0'),
         DeclareLaunchArgument('max_steering_angle', default_value='0.36'),
         DeclareLaunchArgument('use_tf_pose', default_value='true'),
         DeclareLaunchArgument('enable_curvature_speed_limit', default_value='true'),
@@ -47,6 +57,7 @@ def generate_launch_description():
         DeclareLaunchArgument('error_filter_alpha_y', default_value='0.30'),
         DeclareLaunchArgument('error_filter_alpha_psi', default_value='0.25'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
+        DeclareLaunchArgument('centerline_smoothing', default_value='5.0'),
         DeclareLaunchArgument('control_friendly_alpha', default_value='0.56'),
         DeclareLaunchArgument('control_friendly_auto_alpha', default_value='true'),
         DeclareLaunchArgument('control_friendly_smoothing', default_value='2.0'),
@@ -58,13 +69,42 @@ def generate_launch_description():
             default_value=f'{code_dir}/outputs/csv/global_trajectory.csv'),
         DeclareLaunchArgument('log_path',
             default_value=f'{code_dir}/outputs/logs/lqr_tracking_log.csv'),
+        DeclareLaunchArgument('collision_log_path',
+            default_value=f'{code_dir}/outputs/logs/collision_log.csv'),
+        DeclareLaunchArgument('enable_st_corridor_avoidance', default_value='false'),
+        DeclareLaunchArgument('local_path_topic', default_value='/local_trajectory'),
+        DeclareLaunchArgument('local_speed_limit_topic', default_value='/local_speed_limit'),
+        DeclareLaunchArgument('st_lookahead_m', default_value='5.0'),
+        DeclareLaunchArgument('st_sample_ds_m', default_value='0.25'),
+        DeclareLaunchArgument('st_front_fov_deg', default_value='150.0'),
+        DeclareLaunchArgument('st_inflation_margin_m', default_value='0.10'),
+        DeclareLaunchArgument('st_min_border_clearance_m', default_value='0.22'),
+        DeclareLaunchArgument('st_max_lateral_offset_m', default_value='0.65'),
+        DeclareLaunchArgument('st_lateral_offset_step_m', default_value='0.10'),
+        DeclareLaunchArgument('st_takeover_distance_m', default_value='0.0'),
+        DeclareLaunchArgument('st_desired_obstacle_clearance_m', default_value='0.12'),
+        DeclareLaunchArgument('st_max_cluster_radius_m', default_value='0.45'),
+        DeclareLaunchArgument('st_avoidance_max_speed', default_value='1.0'),
+        DeclareLaunchArgument('st_min_speed', default_value='0.35'),
+        DeclareLaunchArgument('st_static_obstacle_manifest_path', default_value=''),
+        DeclareLaunchArgument('st_log_path',
+            default_value=f'{code_dir}/outputs/logs/st_corridor_log.csv'),
     ]
 
+    bridge_runtime_params = dict(bridge_params)
+    bridge_runtime_params.update({
+        'map_path': LaunchConfiguration('map_path'),
+        'map_img_ext': LaunchConfiguration('map_img_ext'),
+        'sx': ParameterValue(LaunchConfiguration('sx'), value_type=float),
+        'sy': ParameterValue(LaunchConfiguration('sy'), value_type=float),
+        'stheta': ParameterValue(LaunchConfiguration('stheta'), value_type=float),
+        'collision_log_path': LaunchConfiguration('collision_log_path'),
+    })
     bridge_node = Node(
         package='f1tenth_gym_ros',
         executable='gym_bridge',
         name='bridge',
-        parameters=[sim_config],
+        parameters=[bridge_runtime_params],
     )
 
     rviz_node = Node(
@@ -79,7 +119,7 @@ def generate_launch_description():
         package='nav2_map_server',
         executable='map_server',
         parameters=[
-            {'yaml_filename': config_dict['bridge']['ros__parameters']['map_path'] + '.yaml'},
+            {'yaml_filename': LaunchConfiguration('map_yaml')},
             {'topic': 'map'},
             {'frame_id': 'map'},
             {'output': 'screen'},
@@ -148,6 +188,7 @@ def generate_launch_description():
         error_alpha_y = LaunchConfiguration('error_filter_alpha_y').perform(context)
         error_alpha_psi = LaunchConfiguration('error_filter_alpha_psi').perform(context)
         traj_mode = LaunchConfiguration('trajectory_mode').perform(context)
+        centerline_smoothing = LaunchConfiguration('centerline_smoothing').perform(context)
         cf_alpha = LaunchConfiguration('control_friendly_alpha').perform(context)
         cf_auto = LaunchConfiguration('control_friendly_auto_alpha').perform(context)
         cf_smooth = LaunchConfiguration('control_friendly_smoothing').perform(context)
@@ -156,6 +197,23 @@ def generate_launch_description():
         track_csv = LaunchConfiguration('track_csv').perform(context)
         traj_csv = LaunchConfiguration('trajectory_csv').perform(context)
         log_path = LaunchConfiguration('log_path').perform(context)
+        enable_st = LaunchConfiguration('enable_st_corridor_avoidance').perform(context).lower() in ('1', 'true', 'yes')
+        local_path_topic = LaunchConfiguration('local_path_topic').perform(context)
+        local_speed_limit_topic = LaunchConfiguration('local_speed_limit_topic').perform(context)
+        st_lookahead = LaunchConfiguration('st_lookahead_m').perform(context)
+        st_sample_ds = LaunchConfiguration('st_sample_ds_m').perform(context)
+        st_front_fov = LaunchConfiguration('st_front_fov_deg').perform(context)
+        st_inflation_margin = LaunchConfiguration('st_inflation_margin_m').perform(context)
+        st_min_border_clearance = LaunchConfiguration('st_min_border_clearance_m').perform(context)
+        st_max_lateral_offset = LaunchConfiguration('st_max_lateral_offset_m').perform(context)
+        st_lateral_offset_step = LaunchConfiguration('st_lateral_offset_step_m').perform(context)
+        st_takeover_distance = LaunchConfiguration('st_takeover_distance_m').perform(context)
+        st_desired_obstacle_clearance = LaunchConfiguration('st_desired_obstacle_clearance_m').perform(context)
+        st_max_cluster_radius = LaunchConfiguration('st_max_cluster_radius_m').perform(context)
+        st_avoidance_max_speed = LaunchConfiguration('st_avoidance_max_speed').perform(context)
+        st_min_speed = LaunchConfiguration('st_min_speed').perform(context)
+        st_static_obstacle_manifest = LaunchConfiguration('st_static_obstacle_manifest_path').perform(context)
+        st_log_path = LaunchConfiguration('st_log_path').perform(context)
 
         planner_proc = ExecuteProcess(
             cmd=[
@@ -165,6 +223,7 @@ def generate_launch_description():
                 '-p', f'track_csv:={track_csv}',
                 '-p', 'use_csv_topic:=false',
                 '-p', f'trajectory_mode:={traj_mode}',
+                '-p', f'centerline_spline_smoothing:={centerline_smoothing}',
                 '-p', f'control_friendly_alpha:={cf_alpha}',
                 '-p', f'control_friendly_auto_alpha:={cf_auto}',
                 '-p', f'control_friendly_spline_smoothing:={cf_smooth}',
@@ -182,16 +241,16 @@ def generate_launch_description():
             'python3', os.path.join(code_dir, 'run_lqr.py'),
             '--ros-args',
             '-r', '__node:=lqr_controller',
-            '-p', 'path_topic:=/global_trajectory',
+            '-p', f'path_topic:={local_path_topic if enable_st else "/global_trajectory"}',
             '-p', 'odom_topic:=/ego_racecar/odom',
             '-p', 'drive_topic:=/drive',
             '-p', f'use_tf_pose:={use_tf_pose}',
             '-p', 'vehicle_frame:=ego_racecar/base_link',
             '-p', 'tf_lookup_timeout_sec:=0.05',
-            '-p', 'path_closed_loop:=true',
+            '-p', f'path_closed_loop:={str(not enable_st).lower()}',
             '-p', 'wheelbase:=0.3302',
             '-p', f'target_speed:={target_speed}',
-            '-p', f'min_speed:={min_speed}',
+            '-p', f'min_speed:={st_min_speed if enable_st else min_speed}',
             '-p', f'max_steering_angle:={max_steer}',
             '-p', f'max_lateral_accel:={max_lat_accel}',
             '-p', f'enable_curvature_speed_limit:={curvature_speed_limit}',
@@ -212,10 +271,16 @@ def generate_launch_description():
             '-p', f'lqr_q_heading:={q_head}',
             '-p', f'lqr_r_steering:={r_steer}',
             '-p', f'lqr_feedforward_gain:={ff_gain}',
-            '-p', f'lqr_lookahead_distance_m:={lqr_lookahead}',
+            '-p', f'lqr_lookahead_distance_m:={0.0 if enable_st else lqr_lookahead}',
             '-p', 'enable_tracking_csv_log:=true',
             '-p', f'tracking_log_path:={log_path}',
         ]
+        if enable_st:
+            lqr_cmd.extend([
+                '-p', f'speed_limit_topic:={local_speed_limit_topic}',
+                '-p', 'speed_limit_timeout_sec:=0.5',
+                '-p', 'preserve_state_on_path_update:=true',
+            ])
         if gain_table_path:
             lqr_cmd.extend(['-p', f'lqr_gain_table_path:={gain_table_path}'])
 
@@ -224,7 +289,42 @@ def generate_launch_description():
             output='screen',
         )
 
-        return [planner_proc, lqr_proc]
+        if not enable_st:
+            return [planner_proc, lqr_proc]
+
+        st_proc = ExecuteProcess(
+            cmd=[
+                'python3', os.path.join(code_dir, 'run_st_corridor_planner.py'),
+                '--ros-args',
+                '-r', '__node:=st_corridor_planner',
+                '-p', 'global_path_topic:=/global_trajectory',
+                '-p', f'local_path_topic:={local_path_topic}',
+                '-p', f'speed_limit_topic:={local_speed_limit_topic}',
+                '-p', 'scan_topic:=/scan',
+                '-p', 'odom_topic:=/ego_racecar/odom',
+                '-p', f'track_csv:={track_csv}',
+                '-p', 'frame_id:=map',
+                '-p', 'vehicle_width:=0.31',
+                '-p', 'scan_x_offset_m:=0.275',
+                '-p', f'inflation_margin_m:={st_inflation_margin}',
+                '-p', f'lookahead_m:={st_lookahead}',
+                '-p', f'sample_ds_m:={st_sample_ds}',
+                '-p', f'front_fov_deg:={st_front_fov}',
+                '-p', f'min_border_clearance_m:={st_min_border_clearance}',
+                '-p', f'max_lateral_offset_m:={st_max_lateral_offset}',
+                '-p', f'lateral_offset_step_m:={st_lateral_offset_step}',
+                '-p', f'takeover_distance_m:={st_takeover_distance}',
+                '-p', f'desired_obstacle_clearance_m:={st_desired_obstacle_clearance}',
+                '-p', f'max_cluster_radius_m:={st_max_cluster_radius}',
+                '-p', f'target_speed:={target_speed}',
+                '-p', f'avoidance_max_speed:={st_avoidance_max_speed}',
+                '-p', f'min_speed:={st_min_speed}',
+                '-p', f'static_obstacle_manifest_path:={st_static_obstacle_manifest}',
+                '-p', f'log_path:={st_log_path}',
+            ],
+            output='screen',
+        )
+        return [planner_proc, st_proc, lqr_proc]
 
     ld = LaunchDescription(launch_args)
     ld.add_action(bridge_node)

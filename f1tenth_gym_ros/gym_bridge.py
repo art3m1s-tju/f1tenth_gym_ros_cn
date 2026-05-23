@@ -23,6 +23,7 @@
 import rclpy
 from rclpy.node import Node
 
+import csv
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
@@ -36,6 +37,7 @@ from tf2_ros import TransformBroadcaster
 
 import gym
 import numpy as np
+from pathlib import Path
 from transforms3d import euler
 
 class GymBridge(Node):
@@ -65,6 +67,7 @@ class GymBridge(Node):
         self.declare_parameter('sy1')
         self.declare_parameter('stheta1')
         self.declare_parameter('kb_teleop')
+        self.declare_parameter('collision_log_path', '')
 
         # check num_agents
         num_agents = self.get_parameter('num_agent').value
@@ -89,6 +92,11 @@ class GymBridge(Node):
         self.ego_requested_speed = 0.0
         self.ego_steer = 0.0
         self.ego_collision = False
+        self.collision_log_file = None
+        self.collision_log_writer = None
+        collision_log_path = self.get_parameter('collision_log_path').value
+        if collision_log_path:
+            self._open_collision_log(collision_log_path)
         ego_scan_topic = self.get_parameter('ego_scan_topic').value
         ego_drive_topic = self.get_parameter('ego_drive_topic').value
         scan_fov = self.get_parameter('scan_fov').value
@@ -180,6 +188,41 @@ class GymBridge(Node):
         self.ego_requested_speed = drive_msg.drive.speed
         self.ego_steer = drive_msg.drive.steering_angle
         self.ego_drive_published = True
+
+    def destroy_node(self):
+        if self.collision_log_file is not None:
+            self.collision_log_file.flush()
+            self.collision_log_file.close()
+            self.collision_log_file = None
+            self.collision_log_writer = None
+        return super().destroy_node()
+
+    def _open_collision_log(self, path):
+        log_path = Path(path).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.collision_log_file = log_path.open('w', newline='', encoding='utf-8')
+        self.collision_log_writer = csv.writer(self.collision_log_file)
+        self.collision_log_writer.writerow([
+            'time', 'ego_collision', 'done', 'x', 'y', 'theta',
+            'requested_speed', 'steering_angle',
+        ])
+        self.collision_log_file.flush()
+
+    def _write_collision_log(self):
+        if self.collision_log_writer is None or self.collision_log_file is None:
+            return
+        ts = self.get_clock().now().nanoseconds * 1e-9
+        self.collision_log_writer.writerow([
+            f'{ts:.6f}',
+            int(bool(self.ego_collision)),
+            int(bool(self.done)),
+            f'{self.ego_pose[0]:.6f}',
+            f'{self.ego_pose[1]:.6f}',
+            f'{self.ego_pose[2]:.6f}',
+            f'{self.ego_requested_speed:.6f}',
+            f'{self.ego_steer:.6f}',
+        ])
+        self.collision_log_file.flush()
 
     def opp_drive_callback(self, drive_msg):
         self.opp_requested_speed = drive_msg.drive.speed
@@ -283,6 +326,12 @@ class GymBridge(Node):
         self.ego_speed[0] = self.obs['linear_vels_x'][0]
         self.ego_speed[1] = self.obs['linear_vels_y'][0]
         self.ego_speed[2] = self.obs['ang_vels_z'][0]
+        if 'collisions' in self.obs:
+            self.ego_collision = bool(self.obs['collisions'][0])
+        else:
+            self.ego_collision = bool(self.done)
+        if self.ego_collision or self.done:
+            self._write_collision_log()
 
         
 
@@ -410,7 +459,12 @@ class GymBridge(Node):
 def main(args=None):
     rclpy.init(args=args)
     gym_bridge = GymBridge()
-    rclpy.spin(gym_bridge)
+    try:
+        rclpy.spin(gym_bridge)
+    finally:
+        gym_bridge.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

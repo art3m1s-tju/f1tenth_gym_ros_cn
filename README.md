@@ -812,6 +812,22 @@ python3 -m lqr_sweep.run_sweep --mode full \
 - `/tracked_path_lqr`（Path）— 实际行驶轨迹（红色）
 - `/ego_racecar/odom`（Odometry）— 实时位姿
 
+
+### ST Corridor 避障测试
+
+本分支新增局部 ST corridor 避障层。开启后，全局 planner 仍发布 `/global_trajectory`，ST planner 发布 `/local_trajectory` 和 `/local_speed_limit`，LQR 跟踪局部轨迹。
+
+```bash
+ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
+  enable_rviz:=true \
+  enable_st_corridor_avoidance:=true \
+  target_speed:=1.0 \
+  st_avoidance_max_speed:=1.0 \
+  st_min_speed:=0.35
+```
+
+RViz 测试和调参命令见 `docs/st_corridor_avoidance_commands.md`。重点观察 `/global_trajectory`、`/local_trajectory`、`/tracked_path_lqr` 和 `/scan`。
+
 ### 文件结构
 
 ```

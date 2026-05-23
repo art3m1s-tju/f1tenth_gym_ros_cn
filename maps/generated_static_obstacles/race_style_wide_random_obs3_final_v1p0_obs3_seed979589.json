@@ -1,0 +1,34 @@
+{
+  "base_map_yaml": "/sim_ws/src/f1tenth_gym_ros/maps/race_style_long.yaml",
+  "trajectory_csv": "/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/race_style_long_trajectory.csv",
+  "map_path": "/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/race_style_wide_random_obs3_final_v1p0_obs3_seed979589",
+  "map_yaml": "/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/race_style_wide_random_obs3_final_v1p0_obs3_seed979589.yaml",
+  "seed": 979589,
+  "obstacle_count": 3,
+  "obstacles": [
+    {
+      "id": 1,
+      "x": 12.0764032,
+      "y": 10.0594721,
+      "size_m": 0.5,
+      "pixel_col": 589,
+      "pixel_row": 64
+    },
+    {
+      "id": 2,
+      "x": 6.8519561,
+      "y": 1.7544816,
+      "size_m": 0.5,
+      "pixel_col": 484,
+      "pixel_row": 230
+    },
+    {
+      "id": 3,
+      "x": -7.7374062,
+      "y": -0.1019092,
+      "size_m": 0.5,
+      "pixel_col": 192,
+      "pixel_row": 267
+    }
+  ]
+}

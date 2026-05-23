@@ -34,6 +34,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
 from scipy.spatial import KDTree
+from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from pnc_rc.lqr.math import (
@@ -115,11 +116,14 @@ class LqrController(Node):
         self.declare_parameter("path_topic", "/global_trajectory")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("drive_topic", "/drive")
+        self.declare_parameter("speed_limit_topic", "")
+        self.declare_parameter("speed_limit_timeout_sec", 0.5)
         self.declare_parameter("tracked_frame", "")
         self.declare_parameter("use_tf_pose", True)
         self.declare_parameter("vehicle_frame", "base_link")
         self.declare_parameter("tf_lookup_timeout_sec", 0.02)
         self.declare_parameter("path_closed_loop", True)
+        self.declare_parameter("preserve_state_on_path_update", False)
         self.declare_parameter("open_loop_finish_distance", 0.25)
 
         # ---- 车辆模型参数 ----
@@ -146,7 +150,7 @@ class LqrController(Node):
         # ---- LQR 核心参数 ----
         self.declare_parameter("control_dt", 0.05)
         self.declare_parameter("lqr_min_model_speed", 0.25)
-        self.declare_parameter("lqr_lookahead_distance_m", 1.5)
+        self.declare_parameter("lqr_lookahead_distance_m", 0.0)
         self.declare_parameter("lqr_q_lateral", 3.0)
         self.declare_parameter("lqr_q_heading", 1.2)
         self.declare_parameter("lqr_r_steering", 8.0)
@@ -165,6 +169,11 @@ class LqrController(Node):
         self.path_topic = str(self.get_parameter("path_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
         self.drive_topic = str(self.get_parameter("drive_topic").value)
+        self.speed_limit_topic = str(self.get_parameter("speed_limit_topic").value)
+        self.speed_limit_timeout_sec = max(
+            0.0,
+            float(self.get_parameter("speed_limit_timeout_sec").value),
+        )
         self.tracked_frame = str(self.get_parameter("tracked_frame").value)
         self.use_tf_pose = bool(self.get_parameter("use_tf_pose").value)
         self.vehicle_frame = str(self.get_parameter("vehicle_frame").value)
@@ -172,6 +181,9 @@ class LqrController(Node):
             seconds=max(0.0, float(self.get_parameter("tf_lookup_timeout_sec").value))
         )
         self.path_closed_loop = bool(self.get_parameter("path_closed_loop").value)
+        self.preserve_state_on_path_update = bool(
+            self.get_parameter("preserve_state_on_path_update").value
+        )
         self.open_loop_finish_distance = max(
             1e-3,
             float(self.get_parameter("open_loop_finish_distance").value),
@@ -272,6 +284,8 @@ class LqrController(Node):
         self.previous_stamp_sec: float | None = None
         self.previous_delta_cmd = 0.0
         self.current_speed_cmd = 0.0  # 速度斜坡当前值
+        self.latest_speed_limit: float | None = None
+        self.latest_speed_limit_stamp_sec: float | None = None
         self.open_loop_finished = False
         self.filtered_lateral_error: float | None = None
         self.filtered_heading_error: float | None = None
@@ -311,6 +325,14 @@ class LqrController(Node):
             self.odom_callback,
             10,
         )
+        self.speed_limit_sub = None
+        if self.speed_limit_topic:
+            self.speed_limit_sub = self.create_subscription(
+                Float32,
+                self.speed_limit_topic,
+                self.speed_limit_callback,
+                10,
+            )
         self.drive_pub = self.create_publisher(
             AckermannDriveStamped,
             self.drive_topic,
@@ -325,7 +347,8 @@ class LqrController(Node):
         self.get_logger().info(
             "LQR controller started "
             f"(path_topic={self.path_topic}, odom_topic={self.odom_topic}, "
-            f"drive_topic={self.drive_topic}, use_tf_pose={self.use_tf_pose}, "
+            f"drive_topic={self.drive_topic}, speed_limit_topic={self.speed_limit_topic or 'disabled'}, "
+            f"use_tf_pose={self.use_tf_pose}, "
             f"target_speed={self.target_speed:.2f}, "
             f"lqr_lookahead={self.lqr_lookahead_distance_m:.2f}m, "
             f"curvature_lookahead={self.curvature_speed_lookahead_m:.2f}m, "
@@ -416,9 +439,10 @@ class LqrController(Node):
         self.kdtree = KDTree(points)
         self.path_frame_id = msg.header.frame_id or self.tracked_frame or "map"
         self.open_loop_finished = False
-        self.previous_delta_cmd = 0.0
-        self.filtered_lateral_error = None
-        self.filtered_heading_error = None
+        if not self.preserve_state_on_path_update:
+            self.previous_delta_cmd = 0.0
+            self.filtered_lateral_error = None
+            self.filtered_heading_error = None
         self.get_logger().info(
             f"Loaded LQR reference path with {len(points)} points "
             f"(frame={self.path_frame_id}, closed_loop={self.path_closed_loop})."
@@ -616,14 +640,41 @@ class LqrController(Node):
 
         return max_curvature
 
-    def _compute_speed_command(self, delta_cmd: float, curvature_ref: float) -> float:
+
+    def speed_limit_callback(self, msg: Float32) -> None:
+        """Receive an optional local-planner speed limit in m/s."""
+        limit = float(msg.data)
+        if math.isfinite(limit):
+            self.latest_speed_limit = max(0.0, limit)
+            now_msg = self.get_clock().now().to_msg()
+            self.latest_speed_limit_stamp_sec = (
+                float(now_msg.sec) + float(now_msg.nanosec) * 1e-9
+            )
+
+    def _compute_speed_command(
+        self,
+        delta_cmd: float,
+        curvature_ref: float,
+        stamp_sec: float,
+    ) -> float:
         """根据转向指令和参考曲率计算安全速度。"""
+        target_speed = self.target_speed
+        speed_limit_fresh = (
+            self.latest_speed_limit is not None
+            and self.latest_speed_limit_stamp_sec is not None
+            and (
+                self.speed_limit_timeout_sec <= 0.0
+                or stamp_sec - self.latest_speed_limit_stamp_sec <= self.speed_limit_timeout_sec
+            )
+        )
+        if speed_limit_fresh and self.latest_speed_limit is not None:
+            target_speed = min(target_speed, self.latest_speed_limit)
         if self.enable_curvature_speed_limit:
             return compute_curvature_limited_speed(
-                self.target_speed, curvature_ref, delta_cmd,
+                target_speed, curvature_ref, delta_cmd,
                 self.wheelbase, self.max_lateral_accel, self.min_speed,
             )
-        return self.target_speed
+        return target_speed
 
     def _apply_steering_rate_limit(self, delta_cmd: float, dt: float) -> tuple[float, bool]:
         """限制相邻控制周期之间的转角命令变化率。"""
@@ -852,7 +903,7 @@ class LqrController(Node):
         )
         delta_cmd, delta_rate_limited = self._apply_steering_rate_limit(delta_cmd, dt)
         curvature_preview = self._preview_curvature(sample)
-        desired_speed = self._compute_speed_command(delta_cmd, curvature_preview)
+        desired_speed = self._compute_speed_command(delta_cmd, curvature_preview, stamp_sec)
         v_cmd = self._apply_speed_ramp(desired_speed, stamp_sec)
 
         if self._open_loop_finished(position):
