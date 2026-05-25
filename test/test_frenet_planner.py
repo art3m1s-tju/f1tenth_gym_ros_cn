@@ -12,8 +12,11 @@ from pnc_rc.frenet.planner import (
     LocalGridConfig,
     ReferencePath,
     build_occupancy_grid,
+    estimate_heading_jumps,
+    estimate_open_path_curvature,
     evaluate_quartic,
     evaluate_quintic,
+    initial_frenet_state,
     plan_frenet_path,
     solve_quartic_longitudinal,
     solve_quintic_lateral,
@@ -91,6 +94,30 @@ def test_occupancy_grid_inflates_scan_obstacle():
     assert clearance == 0.0
 
 
+def test_occupancy_grid_ignores_zero_range_returns():
+    cfg = LocalGridConfig(
+        forward_m=4.0,
+        rear_m=1.0,
+        half_width_m=2.0,
+        resolution_m=0.1,
+        inflation_radius_m=0.3,
+        scan_offset_x_m=0.0,
+    )
+    grid = build_occupancy_grid(
+        np.array([0.0]),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=cfg,
+    )
+    collision, clearance = grid.query_path(np.array([[0.1, 0.0]]), (0.0, 0.0, 0.0))
+
+    assert not grid.has_obstacles
+    assert not collision
+    assert math.isinf(clearance)
+
+
 def test_planner_prefers_centerline_without_obstacles():
     points = np.column_stack([np.linspace(0.0, 20.0, 80), np.zeros(80)])
     # Close the reference with a far return segment; candidates stay on the straight.
@@ -122,3 +149,200 @@ def test_planner_prefers_centerline_without_obstacles():
 
     assert candidate is not None
     assert abs(candidate.d[-1]) < 1e-9
+
+
+def test_initial_frenet_state_d_dot_uses_single_normal_projection():
+    points = np.column_stack([np.linspace(0.0, 10.0, 20), np.zeros(20)])
+    points = np.vstack([points, [[10.0, 4.0], [0.0, 4.0]]])
+    reference = ReferencePath.from_points(points)
+
+    state = initial_frenet_state(
+        reference=reference,
+        position=np.array([1.0, 0.0]),
+        yaw=math.pi / 4.0,
+        velocity_xy=np.array([1.0, 1.0]),
+        previous_s=None,
+        previous_s_dot=None,
+        dt=None,
+    )
+
+    assert np.isclose(state.s_dot, 1.0, atol=1e-6)
+    assert np.isclose(state.d_dot, 1.0, atol=1e-6)
+
+
+def test_initial_frenet_state_uses_previous_s_to_avoid_branch_jump():
+    points = np.array(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 1.0],
+            [0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    reference = ReferencePath.from_points(points)
+
+    branch_a = reference.project(np.array([5.0, 0.1]))
+    branch_b = reference.project(np.array([5.0, 0.9]))
+    state = initial_frenet_state(
+        reference=reference,
+        position=np.array([5.0, 0.6]),
+        yaw=0.0,
+        velocity_xy=np.array([0.2, 0.0]),
+        previous_s=branch_a[0],
+        previous_s_dot=0.2,
+        dt=0.1,
+        projection_window_m=3.0,
+    )
+
+    assert abs(state.d) < 1.0
+    assert abs(state.s - branch_a[0]) < 3.0
+    assert abs(state.s - branch_b[0]) > 3.0
+
+
+def test_heading_jump_estimator_detects_reversal():
+    points = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+    jumps = estimate_heading_jumps(points)
+
+    assert len(jumps) == 2
+    assert np.max(np.abs(jumps)) > math.pi / 3.0
+
+
+def test_open_path_curvature_ignores_near_duplicate_start_samples():
+    points = np.array(
+        [
+            [0.0, 0.0],
+            [0.0005, 0.0],
+            [0.0040, 0.0001],
+            [0.0130, 0.0008],
+            [0.0300, 0.0030],
+            [0.0570, 0.0088],
+            [0.0960, 0.0184],
+            [0.1490, 0.0328],
+            [0.2180, 0.0530],
+            [0.3050, 0.0800],
+        ],
+        dtype=float,
+    )
+
+    curvature = estimate_open_path_curvature(points)
+
+    assert len(curvature) >= 3
+    assert float(np.max(np.abs(curvature))) < 1.8
+
+
+def test_planner_rejects_candidates_with_insufficient_progress():
+    points = np.column_stack([np.linspace(0.0, 20.0, 80), np.zeros(80)])
+    points = np.vstack([points, [[20.0, 8.0], [0.0, 8.0]]])
+    reference = ReferencePath.from_points(points)
+    state = FrenetState(s=0.0, d=0.0, s_dot=0.0, d_dot=0.0, s_ddot=0.0, d_ddot=0.0)
+    grid = build_occupancy_grid(
+        np.array([], dtype=float),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=LocalGridConfig(),
+    )
+    config = FrenetPlannerConfig(
+        d_min=0.0,
+        d_max=0.0,
+        d_step=1.0,
+        t_min=1.0,
+        t_max=1.0,
+        t_step=1.0,
+        v_min=0.2,
+        v_max=0.2,
+        v_step=1.0,
+        target_speed=0.2,
+        min_progress_step_m=0.25,
+    )
+
+    candidate = plan_frenet_path(reference, state, grid, (0.0, 0.0, 0.0), config)
+
+    assert candidate is None
+
+
+def test_planner_allows_stationary_start_when_total_progress_is_sufficient():
+    points = np.column_stack([np.linspace(0.0, 20.0, 80), np.zeros(80)])
+    points = np.vstack([points, [[20.0, 8.0], [0.0, 8.0]]])
+    reference = ReferencePath.from_points(points)
+    state = FrenetState(s=0.0, d=0.0, s_dot=0.0, d_dot=0.0, s_ddot=0.0, d_ddot=0.0)
+    grid = build_occupancy_grid(
+        np.array([], dtype=float),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=LocalGridConfig(),
+    )
+    config = FrenetPlannerConfig(
+        d_min=0.0,
+        d_max=0.0,
+        d_step=1.0,
+        t_min=2.0,
+        t_max=2.0,
+        t_step=1.0,
+        v_min=0.6,
+        v_max=0.6,
+        v_step=1.0,
+        target_speed=0.6,
+        min_progress_step_m=0.2,
+    )
+
+    candidate = plan_frenet_path(reference, state, grid, (0.0, 0.0, 0.0), config)
+
+    assert candidate is not None
+    assert candidate.s[-1] - candidate.s[0] > 0.2
+
+
+def test_planner_accepts_curved_reference_from_stationary_start():
+    theta = np.linspace(0.0, 2.0 * math.pi, 120, endpoint=False)
+    points = np.column_stack([5.0 * np.cos(theta), 5.0 * np.sin(theta)])
+    reference = ReferencePath.from_points(points)
+    position = np.array([5.0, 0.0], dtype=float)
+    state = initial_frenet_state(
+        reference=reference,
+        position=position,
+        yaw=math.pi / 2.0,
+        velocity_xy=np.array([0.0, 0.0]),
+        previous_s=None,
+        previous_s_dot=None,
+        dt=None,
+    )
+    grid = build_occupancy_grid(
+        np.array([], dtype=float),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=LocalGridConfig(),
+    )
+    config = FrenetPlannerConfig(
+        d_min=-0.2,
+        d_max=0.2,
+        d_step=0.1,
+        t_min=2.0,
+        t_max=2.0,
+        t_step=1.0,
+        v_min=0.6,
+        v_max=1.2,
+        v_step=0.3,
+        target_speed=0.9,
+        max_curvature=1.8,
+        min_progress_step_m=0.2,
+    )
+
+    candidate = plan_frenet_path(reference, state, grid, (5.0, 0.0, math.pi / 2.0), config)
+
+    assert candidate is not None
+    assert candidate.max_curvature <= config.max_curvature

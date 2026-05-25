@@ -6,6 +6,7 @@ import time
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import Point
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from nav_msgs.msg import Odometry
@@ -13,6 +14,8 @@ from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import LaserScan
+from visualization_msgs.msg import Marker
+from visualization_msgs.msg import MarkerArray
 
 from pnc_rc.frenet.planner import (
     FrenetPlanStats,
@@ -58,12 +61,18 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("v_max", 2.5)
         self.declare_parameter("v_step", 0.3)
         self.declare_parameter("trajectory_dt", 0.1)
+        self.declare_parameter("max_heading_jump", 0.65)
+        self.declare_parameter("min_progress_step_m", 0.20)
         self.declare_parameter("grid_forward_m", 7.0)
         self.declare_parameter("grid_rear_m", 1.0)
         self.declare_parameter("grid_half_width_m", 3.0)
         self.declare_parameter("grid_resolution_m", 0.05)
         self.declare_parameter("grid_inflation_radius_m", 0.28)
         self.declare_parameter("scan_offset_x_m", 0.275)
+        self.declare_parameter("debug_marker_topic", "/frenet/debug/candidates")
+        self.declare_parameter("debug_max_safe_candidates", 12)
+        self.declare_parameter("reuse_last_candidate_timeout_s", 1.0)
+        self.declare_parameter("projection_search_window_m", 6.0)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
         self.planner_config = FrenetPlannerConfig(
@@ -78,6 +87,8 @@ class FrenetStaticObstaclePlanner(Node):
             v_step=float(self.get_parameter("v_step").value),
             trajectory_dt=float(self.get_parameter("trajectory_dt").value),
             target_speed=float(self.get_parameter("target_speed").value),
+            max_heading_jump=float(self.get_parameter("max_heading_jump").value),
+            min_progress_step_m=float(self.get_parameter("min_progress_step_m").value),
         )
         self.grid_config = LocalGridConfig(
             forward_m=float(self.get_parameter("grid_forward_m").value),
@@ -96,6 +107,11 @@ class FrenetStaticObstaclePlanner(Node):
             PathMsg,
             str(self.get_parameter("local_path_topic").value),
             qos_profile,
+        )
+        self.debug_marker_pub = self.create_publisher(
+            MarkerArray,
+            str(self.get_parameter("debug_marker_topic").value),
+            10,
         )
         self.global_path_sub = self.create_subscription(
             PathMsg,
@@ -132,11 +148,29 @@ class FrenetStaticObstaclePlanner(Node):
         self.previous_s_dot: float | None = None
         self.previous_plan_time: float | None = None
         self.last_no_candidate_log_time = 0.0
+        self.debug_max_safe_candidates = max(
+            1,
+            int(self.get_parameter("debug_max_safe_candidates").value),
+        )
+        self.reuse_last_candidate_timeout_s = max(
+            0.0,
+            float(self.get_parameter("reuse_last_candidate_timeout_s").value),
+        )
+        self.projection_search_window_m = max(
+            0.5,
+            float(self.get_parameter("projection_search_window_m").value),
+        )
         publish_rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
         self.timer = self.create_timer(1.0 / publish_rate, self.plan_once)
+        self.last_safe_candidate_xy: np.ndarray | None = None
+        self.last_safe_candidate_time: float | None = None
+        self.last_reuse_log_time = 0.0
+        self.previous_s: float | None = None
         self.get_logger().info(
             "Frenet static obstacle planner started "
-            f"(local_path={self.path_pub.topic_name}, rate={publish_rate:.1f}Hz)."
+            f"(local_path={self.path_pub.topic_name}, "
+            f"debug_markers={self.debug_marker_pub.topic_name}, "
+            f"rate={publish_rate:.1f}Hz)."
         )
 
     def global_path_callback(self, msg: PathMsg) -> None:
@@ -188,13 +222,17 @@ class FrenetStaticObstaclePlanner(Node):
             position,
             yaw,
             velocity_xy,
+            self.previous_s,
             self.previous_s_dot,
             dt,
+            self.projection_search_window_m,
         )
+        self.previous_s = state.s
         self.previous_s_dot = state.s_dot
         self.previous_plan_time = now
 
         if self.latest_scan is None:
+            self.publish_debug_markers(stamp, [], None)
             self.publish_stop_path(stamp, position, yaw)
             return
 
@@ -211,6 +249,7 @@ class FrenetStaticObstaclePlanner(Node):
             static_occupied=static_occupancy,
         )
         stats = FrenetPlanStats()
+        debug_candidates = []
         candidate = plan_frenet_path(
             self.reference,
             state,
@@ -218,11 +257,26 @@ class FrenetStaticObstaclePlanner(Node):
             vehicle_pose,
             self.planner_config,
             stats,
+            debug_candidates=debug_candidates,
         )
         if candidate is None:
-            self.log_no_candidate(stats, occupancy, static_occupancy is not None)
+            if self._reuse_last_candidate_if_fresh(stamp, now):
+                self.publish_debug_markers(stamp, [], None)
+                return
+            self.log_no_candidate(
+                stats,
+                occupancy,
+                static_occupancy is not None,
+                state,
+                velocity_xy,
+                scan,
+            )
+            self.publish_debug_markers(stamp, [], None)
             self.publish_stop_path(stamp, position, yaw)
             return
+        self.last_safe_candidate_xy = np.asarray(candidate.xy, dtype=float).copy()
+        self.last_safe_candidate_time = now
+        self.publish_debug_markers(stamp, debug_candidates, candidate)
         self.publish_path(stamp, candidate.xy)
 
     def log_no_candidate(
@@ -230,18 +284,32 @@ class FrenetStaticObstaclePlanner(Node):
         stats: FrenetPlanStats,
         occupancy,
         static_map_ready: bool,
+        state,
+        velocity_xy: np.ndarray,
+        scan: LaserScan,
     ) -> None:
         now = time.monotonic()
         if now - self.last_no_candidate_log_time < 0.5:
             return
         self.last_no_candidate_log_time = now
         occupied_cells = int(np.count_nonzero(occupancy.occupied))
+        scan_ranges = np.asarray(scan.ranges, dtype=float)
+        finite_mask = np.isfinite(scan_ranges)
+        zero_like_count = int(np.count_nonzero(finite_mask & (scan_ranges < 1e-3)))
+        finite_count = int(np.count_nonzero(finite_mask))
+        speed_mps = float(np.linalg.norm(velocity_xy))
         self.get_logger().warning(
             "No safe Frenet candidate; publishing stop path "
             f"(total={stats.total_candidates}, safe={stats.safe_candidates}, "
+            f"progress_reject={stats.progress_rejections}, "
+            f"heading_reject={stats.heading_rejections}, "
+            f"curvature_reject={stats.curvature_rejections}, "
             f"collision_reject={stats.collision_rejections}, "
             f"best_clearance={stats.best_clearance_m:.2f}m, "
-            f"occupied_cells={occupied_cells}, static_map_ready={static_map_ready})."
+            f"occupied_cells={occupied_cells}, static_map_ready={static_map_ready}, "
+            f"s={state.s:.2f}, d={state.d:.2f}, s_dot={state.s_dot:.2f}, "
+            f"d_dot={state.d_dot:.2f}, speed={speed_mps:.2f}, "
+            f"scan_zero_like={zero_like_count}/{finite_count})."
         )
 
     def publish_stop_path(self, stamp, position: np.ndarray, yaw: float) -> None:
@@ -268,6 +336,66 @@ class FrenetStaticObstaclePlanner(Node):
             pose.pose.orientation.w = qw
             path_msg.poses.append(pose)
         self.path_pub.publish(path_msg)
+
+    def publish_debug_markers(self, stamp, candidates, best_candidate) -> None:
+        marker_array = MarkerArray()
+        marker_array.markers.append(self._delete_all_marker(stamp))
+
+        for marker_id, candidate in enumerate(candidates[: self.debug_max_safe_candidates]):
+            is_best = best_candidate is not None and candidate is best_candidate
+            marker = self._candidate_marker(
+                stamp,
+                candidate.xy,
+                marker_id,
+                is_best=is_best,
+            )
+            marker_array.markers.append(marker)
+
+        self.debug_marker_pub.publish(marker_array)
+
+    def _reuse_last_candidate_if_fresh(self, stamp, now: float) -> bool:
+        if self.last_safe_candidate_xy is None or self.last_safe_candidate_time is None:
+            return False
+        age = now - self.last_safe_candidate_time
+        if age > self.reuse_last_candidate_timeout_s:
+            return False
+        if now - self.last_reuse_log_time >= 0.5:
+            self.last_reuse_log_time = now
+            self.get_logger().warning(
+                "No safe Frenet candidate in current cycle; reusing last safe path "
+                f"(age={age:.2f}s)."
+            )
+        self.publish_path(stamp, self.last_safe_candidate_xy)
+        return True
+
+    def _delete_all_marker(self, stamp) -> Marker:
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = stamp
+        marker.action = Marker.DELETEALL
+        return marker
+
+    def _candidate_marker(self, stamp, points: np.ndarray, marker_id: int, *, is_best: bool) -> Marker:
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = stamp
+        marker.ns = "frenet_candidates"
+        marker.id = marker_id
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.07 if is_best else 0.025
+        marker.color.a = 0.95 if is_best else 0.35
+        marker.color.r = 1.0 if is_best else 0.15
+        marker.color.g = 0.75 if is_best else 0.95
+        marker.color.b = 0.15 if is_best else 1.0
+        for x_value, y_value in points:
+            point = Point()
+            point.x = float(x_value)
+            point.y = float(y_value)
+            point.z = 0.06 if is_best else 0.03
+            marker.points.append(point)
+        return marker
 
     def local_map_occupancy(self, vehicle_pose: tuple[float, float, float]) -> np.ndarray | None:
         if (

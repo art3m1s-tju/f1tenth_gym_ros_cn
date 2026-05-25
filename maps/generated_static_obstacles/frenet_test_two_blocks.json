@@ -1,0 +1,40 @@
+{
+  "base_yaml": "/sim_ws/src/f1tenth_gym_ros/maps/frenet_test_loop.yaml",
+  "obstacle_count": 2,
+  "obstacle_distances_m": [
+    6.0,
+    13.0
+  ],
+  "obstacle_size_m": 0.4,
+  "obstacles": [
+    {
+      "center_x_m": -5.9557931,
+      "center_y_m": 4.9077958,
+      "col_range": [
+        129,
+        137
+      ],
+      "row_range": [
+        49,
+        57
+      ],
+      "size_m": 0.4
+    },
+    {
+      "center_x_m": -9.9974311,
+      "center_y_m": -0.1602579,
+      "col_range": [
+        48,
+        56
+      ],
+      "row_range": [
+        150,
+        158
+      ],
+      "size_m": 0.4
+    }
+  ],
+  "output_yaml": "/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/frenet_test_two_blocks.yaml",
+  "seed": 7,
+  "trajectory_csv": "/sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/frenet_test_loop_trajectory.csv"
+}

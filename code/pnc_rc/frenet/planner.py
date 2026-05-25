@@ -8,8 +8,12 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import KDTree
 
-from pnc_rc.lqr.geometry import interpolate_angle, project_to_path
+from pnc_rc.lqr.geometry import PathProjection, interpolate_angle, project_to_path
 from pnc_rc.lqr.math import compute_path_curvatures, compute_path_headings, wrap_angle
+
+
+MIN_VALID_SCAN_RANGE_M = 1e-3
+MIN_CURVATURE_SAMPLE_SPACING_M = 0.03
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,8 @@ class FrenetPlannerConfig:
     weight_curvature: float = 2.5
     weight_curvature_rate: float = 0.8
     weight_lateral_shift: float = 1.2
+    max_heading_jump: float = 0.65
+    min_progress_step_m: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -96,12 +102,25 @@ class ReferencePath:
             self.curvatures,
             closed_loop=True,
         )
-        segment_length = float(self.segment_lengths[projection.segment_idx])
-        s = float(
-            self.cumulative_s[projection.segment_idx]
-            + projection.segment_t * segment_length
+        return self._projection_to_frenet(projection)
+
+    def project_near(
+        self,
+        position: np.ndarray,
+        s_hint: float,
+        search_window_m: float,
+    ) -> tuple[float, float, float, float]:
+        if search_window_m <= 0.0:
+            return self.project(position)
+        wrapped_hint = float(s_hint % self.total_length)
+        candidate_segments = self._candidate_segments_near_s(
+            wrapped_hint,
+            search_window_m,
         )
-        return s, projection.lateral_error, projection.heading, projection.curvature
+        if not candidate_segments:
+            return self.project(position)
+        projection = self._project_to_candidate_segments(position, candidate_segments)
+        return self._projection_to_frenet(projection)
 
     def sample(self, s: float, d: float) -> tuple[np.ndarray, float, float]:
         s = float(s % self.total_length)
@@ -128,6 +147,88 @@ class ReferencePath:
         )
         normal = np.array([-math.sin(heading), math.cos(heading)])
         return point + d * normal, heading, curvature
+
+    def _projection_to_frenet(
+        self,
+        projection: PathProjection,
+    ) -> tuple[float, float, float, float]:
+        segment_length = float(self.segment_lengths[projection.segment_idx])
+        s = float(
+            self.cumulative_s[projection.segment_idx]
+            + projection.segment_t * segment_length
+        )
+        return s, projection.lateral_error, projection.heading, projection.curvature
+
+    def _candidate_segments_near_s(
+        self,
+        s_hint: float,
+        search_window_m: float,
+    ) -> list[int]:
+        segment_mid_s = (
+            self.cumulative_s + 0.5 * self.segment_lengths[: len(self.points)]
+        ) % self.total_length
+        arc_distance = np.abs(
+            ((segment_mid_s - s_hint + 0.5 * self.total_length) % self.total_length)
+            - 0.5 * self.total_length
+        )
+        candidate_segments = np.flatnonzero(
+            arc_distance <= (search_window_m + 0.5 * self.segment_lengths[: len(self.points)])
+        )
+        return [int(segment_idx) for segment_idx in candidate_segments]
+
+    def _project_to_candidate_segments(
+        self,
+        position: np.ndarray,
+        candidate_segments: list[int],
+    ) -> PathProjection:
+        best_dist = float("inf")
+        best_point = self.points[candidate_segments[0]].copy()
+        best_seg_idx = candidate_segments[0]
+        best_t = 0.0
+        best_heading = float(self.headings[best_seg_idx])
+        best_curvature = float(self.curvatures[best_seg_idx])
+
+        for seg_idx in candidate_segments:
+            start = self.points[seg_idx]
+            end = self.points[(seg_idx + 1) % len(self.points)]
+            segment = end - start
+            segment_length_sq = float(segment @ segment)
+            if segment_length_sq <= 1e-12:
+                continue
+            t = float(
+                np.clip(((position - start) @ segment) / segment_length_sq, 0.0, 1.0)
+            )
+            projected = start + t * segment
+            distance = float(np.linalg.norm(position - projected))
+            if distance >= best_dist:
+                continue
+            best_dist = distance
+            best_point = projected
+            best_seg_idx = seg_idx
+            best_t = t
+            next_idx = (seg_idx + 1) % len(self.points)
+            best_heading = interpolate_angle(
+                float(self.headings[seg_idx]),
+                float(self.headings[next_idx]),
+                t,
+            )
+            best_curvature = float(
+                (1.0 - t) * self.curvatures[seg_idx]
+                + t * self.curvatures[next_idx]
+            )
+
+        normal = np.array([-math.sin(best_heading), math.cos(best_heading)])
+        lateral_error = float((position - best_point) @ normal)
+        closest_idx = best_seg_idx if best_t < 0.5 else (best_seg_idx + 1) % len(self.points)
+        return PathProjection(
+            point=best_point,
+            heading=best_heading,
+            curvature=best_curvature,
+            lateral_error=lateral_error,
+            segment_idx=best_seg_idx,
+            segment_t=best_t,
+            closest_idx=closest_idx,
+        )
 
 
 @dataclass(frozen=True)
@@ -180,6 +281,9 @@ class CandidatePath:
 class FrenetPlanStats:
     total_candidates: int = 0
     collision_rejections: int = 0
+    progress_rejections: int = 0
+    heading_rejections: int = 0
+    curvature_rejections: int = 0
     safe_candidates: int = 0
     best_clearance_m: float = 0.0
 
@@ -202,7 +306,8 @@ def build_occupancy_grid(
     ranges = np.asarray(ranges, dtype=float)
     indices = np.arange(len(ranges), dtype=float)
     angles = angle_min + indices * angle_increment
-    valid = np.isfinite(ranges) & (ranges >= range_min) & (ranges <= range_max)
+    min_valid_range = max(float(range_min), MIN_VALID_SCAN_RANGE_M)
+    valid = np.isfinite(ranges) & (ranges >= min_valid_range) & (ranges <= range_max)
     if np.any(valid):
         x = ranges[valid] * np.cos(angles[valid]) + config.scan_offset_x_m
         y = ranges[valid] * np.sin(angles[valid])
@@ -299,10 +404,19 @@ def initial_frenet_state(
     position: np.ndarray,
     yaw: float,
     velocity_xy: np.ndarray,
+    previous_s: float | None,
     previous_s_dot: float | None,
     dt: float | None,
+    projection_window_m: float = 6.0,
 ) -> FrenetState:
-    s, d, heading, _ = reference.project(position)
+    if previous_s is None:
+        s, d, heading, _ = reference.project(position)
+    else:
+        s, d, heading, _ = reference.project_near(
+            position,
+            previous_s,
+            projection_window_m,
+        )
     tangent = np.array([math.cos(heading), math.sin(heading)])
     normal = np.array([-math.sin(heading), math.cos(heading)])
     s_dot = max(0.0, float(np.dot(velocity_xy, tangent)))
@@ -311,7 +425,6 @@ def initial_frenet_state(
         s_ddot = 0.0
     else:
         s_ddot = float(np.clip((s_dot - previous_s_dot) / dt, -4.0, 4.0))
-    d_dot += s_dot * math.sin(wrap_angle(yaw - heading))
     return FrenetState(s=s, d=d, s_dot=s_dot, d_dot=d_dot, s_ddot=s_ddot, d_ddot=0.0)
 
 
@@ -322,6 +435,7 @@ def plan_frenet_path(
     vehicle_pose: tuple[float, float, float],
     config: FrenetPlannerConfig,
     stats: FrenetPlanStats | None = None,
+    debug_candidates: list[CandidatePath] | None = None,
 ) -> CandidatePath | None:
     candidates: list[CandidatePath] = []
     for d_final in _sample_range(config.d_min, config.d_max, config.d_step):
@@ -334,11 +448,30 @@ def plan_frenet_path(
             )
             d_values, d_dot_values, _, d_jerk_values = evaluate_quintic(d_coeff, time_values)
             for speed_final in _sample_range(config.v_min, config.v_max, config.v_step):
-                s_coeff = solve_quartic_longitudinal(state, speed_final, duration)
-                s_values, s_dot_values, _, s_jerk_values = evaluate_quartic(s_coeff, time_values)
-                xy = np.array([reference.sample(s, d)[0] for s, d in zip(s_values, d_values)])
                 if stats is not None:
                     stats.total_candidates += 1
+                s_coeff = solve_quartic_longitudinal(state, speed_final, duration)
+                s_values, s_dot_values, _, s_jerk_values = evaluate_quartic(s_coeff, time_values)
+                progress_ok = _has_valid_progress_profile(
+                    s_values,
+                    s_dot_values,
+                    config,
+                )
+                if not progress_ok:
+                    if stats is not None:
+                        stats.progress_rejections += 1
+                    continue
+                xy = np.array([reference.sample(s, d)[0] for s, d in zip(s_values, d_values)])
+                heading_jumps = estimate_heading_jumps(xy)
+                max_heading_jump = (
+                    float(np.max(np.abs(heading_jumps)))
+                    if len(heading_jumps)
+                    else 0.0
+                )
+                if max_heading_jump > config.max_heading_jump:
+                    if stats is not None:
+                        stats.heading_rejections += 1
+                    continue
                 collision, min_clearance = occupancy.query_path(xy, vehicle_pose)
                 if stats is not None:
                     stats.best_clearance_m = max(stats.best_clearance_m, min_clearance)
@@ -346,25 +479,33 @@ def plan_frenet_path(
                     if stats is not None:
                         stats.collision_rejections += 1
                     continue
+                scored_candidate = score_candidate(
+                    xy,
+                    s_values,
+                    d_values,
+                    s_dot_values,
+                    d_dot_values,
+                    d_jerk_values,
+                    s_jerk_values,
+                    duration,
+                    min_clearance,
+                    config,
+                )
+                if scored_candidate.max_curvature > config.max_curvature:
+                    if stats is not None:
+                        stats.curvature_rejections += 1
+                    continue
                 if stats is not None:
                     stats.safe_candidates += 1
-                candidates.append(
-                    score_candidate(
-                        xy,
-                        s_values,
-                        d_values,
-                        s_dot_values,
-                        d_dot_values,
-                        d_jerk_values,
-                        s_jerk_values,
-                        duration,
-                        min_clearance,
-                        config,
-                    )
-                )
+                candidates.append(scored_candidate)
+                if debug_candidates is not None:
+                    debug_candidates.append(scored_candidate)
     if not candidates:
         return None
-    return min(candidates, key=lambda candidate: candidate.cost)
+    candidates.sort(key=lambda candidate: candidate.cost)
+    if debug_candidates is not None:
+        debug_candidates.sort(key=lambda candidate: candidate.cost)
+    return candidates[0]
 
 
 def score_candidate(
@@ -496,12 +637,47 @@ def evaluate_quartic(
 def estimate_open_path_curvature(points: np.ndarray) -> np.ndarray:
     if len(points) < 3:
         return np.zeros(len(points), dtype=float)
-    dx = np.gradient(points[:, 0])
-    dy = np.gradient(points[:, 1])
-    ddx = np.gradient(dx)
-    ddy = np.gradient(dy)
-    denominator = np.maximum((dx * dx + dy * dy) ** 1.5, 1e-9)
+    filtered = _compress_path_samples(points, MIN_CURVATURE_SAMPLE_SPACING_M)
+    if len(filtered) < 3:
+        return np.zeros(len(filtered), dtype=float)
+    cumulative_s = _cumulative_arc_length(filtered)
+    dx = np.gradient(filtered[:, 0], cumulative_s)
+    dy = np.gradient(filtered[:, 1], cumulative_s)
+    ddx = np.gradient(dx, cumulative_s)
+    ddy = np.gradient(dy, cumulative_s)
+    denominator = np.maximum((dx * dx + dy * dy) ** 1.5, 1e-6)
     return (dx * ddy - dy * ddx) / denominator
+
+
+def estimate_heading_jumps(points: np.ndarray) -> np.ndarray:
+    if len(points) < 3:
+        return np.zeros(0, dtype=float)
+    segment_vectors = np.diff(points, axis=0)
+    segment_lengths = np.linalg.norm(segment_vectors, axis=1)
+    valid = segment_lengths > 1e-6
+    if np.count_nonzero(valid) < 2:
+        return np.zeros(0, dtype=float)
+    headings = np.arctan2(segment_vectors[valid, 1], segment_vectors[valid, 0])
+    return np.array(
+        [wrap_angle(float(curr - prev)) for prev, curr in zip(headings[:-1], headings[1:])],
+        dtype=float,
+    )
+
+
+def _has_valid_progress_profile(
+    s_values: np.ndarray,
+    s_dot_values: np.ndarray,
+    config: FrenetPlannerConfig,
+) -> bool:
+    if np.any(s_dot_values < -1e-6):
+        return False
+    progress_steps = np.diff(s_values)
+    if np.any(progress_steps < -1e-6):
+        return False
+    total_progress = float(s_values[-1] - s_values[0]) if len(s_values) else 0.0
+    if total_progress < config.min_progress_step_m:
+        return False
+    return True
 
 
 def _sample_range(start: float, stop: float, step: float) -> np.ndarray:
@@ -509,6 +685,26 @@ def _sample_range(start: float, stop: float, step: float) -> np.ndarray:
         return np.array([start], dtype=float)
     count = int(math.floor((stop - start) / step + 0.5)) + 1
     return start + step * np.arange(max(1, count), dtype=float)
+
+
+def _compress_path_samples(points: np.ndarray, min_spacing_m: float) -> np.ndarray:
+    if len(points) < 2:
+        return np.asarray(points, dtype=float)
+    filtered = [np.asarray(points[0], dtype=float)]
+    min_spacing_m = max(0.0, float(min_spacing_m))
+    for point in np.asarray(points[1:], dtype=float):
+        if np.linalg.norm(point - filtered[-1]) >= min_spacing_m:
+            filtered.append(point)
+    if np.linalg.norm(np.asarray(points[-1], dtype=float) - filtered[-1]) > 1e-9:
+        filtered.append(np.asarray(points[-1], dtype=float))
+    return np.asarray(filtered, dtype=float)
+
+
+def _cumulative_arc_length(points: np.ndarray) -> np.ndarray:
+    if len(points) < 2:
+        return np.zeros(len(points), dtype=float)
+    segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    return np.concatenate([[0.0], np.cumsum(segment_lengths)])
 
 
 def _local_points_to_indices(

@@ -1,5 +1,6 @@
 """Launch file: F1TENTH simulator + control_friendly planner + LQR controller."""
 import os
+import tempfile
 import yaml
 
 from launch import LaunchDescription
@@ -29,6 +30,18 @@ def generate_launch_description():
             'map_img_ext',
             default_value=config_dict['bridge']['ros__parameters']['map_img_ext'],
         ),
+        DeclareLaunchArgument(
+            'sx',
+            default_value=str(config_dict['bridge']['ros__parameters']['sx']),
+        ),
+        DeclareLaunchArgument(
+            'sy',
+            default_value=str(config_dict['bridge']['ros__parameters']['sy']),
+        ),
+        DeclareLaunchArgument(
+            'stheta',
+            default_value=str(config_dict['bridge']['ros__parameters']['stheta']),
+        ),
         DeclareLaunchArgument('target_speed', default_value='1.0'),
         DeclareLaunchArgument('min_speed', default_value='0.4'),
         DeclareLaunchArgument('lqr_q_lateral', default_value='3.0'),
@@ -56,8 +69,15 @@ def generate_launch_description():
         DeclareLaunchArgument('error_filter_alpha_psi', default_value='0.25'),
         DeclareLaunchArgument('enable_frenet_planner', default_value='false'),
         DeclareLaunchArgument('frenet_publish_rate_hz', default_value='20.0'),
-        DeclareLaunchArgument('frenet_d_min', default_value='-1.0'),
-        DeclareLaunchArgument('frenet_d_max', default_value='1.0'),
+        DeclareLaunchArgument('frenet_target_speed', default_value='1.5'),
+        DeclareLaunchArgument('frenet_v_min', default_value='0.6'),
+        DeclareLaunchArgument('frenet_v_max', default_value='2.5'),
+        DeclareLaunchArgument('frenet_d_min', default_value='-1.8'),
+        DeclareLaunchArgument('frenet_d_max', default_value='1.8'),
+        DeclareLaunchArgument('frenet_max_heading_jump', default_value='0.85'),
+        DeclareLaunchArgument('frenet_min_progress_step_m', default_value='0.20'),
+        DeclareLaunchArgument('frenet_reuse_last_candidate_timeout_s', default_value='1.0'),
+        DeclareLaunchArgument('frenet_projection_search_window_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
         DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
@@ -73,19 +93,6 @@ def generate_launch_description():
         DeclareLaunchArgument('log_path',
             default_value=f'{code_dir}/outputs/logs/lqr_tracking_log.csv'),
     ]
-
-    bridge_node = Node(
-        package='f1tenth_gym_ros',
-        executable='gym_bridge',
-        name='bridge',
-        parameters=[
-            sim_config,
-            {
-                'map_path': LaunchConfiguration('map_path'),
-                'map_img_ext': LaunchConfiguration('map_img_ext'),
-            },
-        ],
-    )
 
     rviz_node = Node(
         package='rviz2',
@@ -135,6 +142,34 @@ def generate_launch_description():
     # Use OpaqueFunction to resolve LaunchConfiguration at launch time
     from launch.actions import OpaqueFunction
 
+    def create_bridge_node(context):
+        map_path = LaunchConfiguration('map_path').perform(context)
+        map_img_ext = LaunchConfiguration('map_img_ext').perform(context)
+        sx = float(LaunchConfiguration('sx').perform(context))
+        sy = float(LaunchConfiguration('sy').perform(context))
+        stheta = float(LaunchConfiguration('stheta').perform(context))
+        bridge_config = yaml.safe_load(open(sim_config, 'r'))
+        bridge_params = bridge_config['bridge']['ros__parameters']
+        bridge_params['map_path'] = map_path
+        bridge_params['map_img_ext'] = map_img_ext
+        bridge_params['sx'] = sx
+        bridge_params['sy'] = sy
+        bridge_params['stheta'] = stheta
+        temp_config = os.path.join(
+            tempfile.gettempdir(),
+            'f1tenth_bridge_launch.yaml',
+        )
+        with open(temp_config, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(bridge_config, f, sort_keys=False)
+        return [
+            Node(
+                package='f1tenth_gym_ros',
+                executable='gym_bridge',
+                name='bridge',
+                parameters=[temp_config],
+            )
+        ]
+
     def launch_pnc_nodes(context):
         target_speed = LaunchConfiguration('target_speed').perform(context)
         min_speed = LaunchConfiguration('min_speed').perform(context)
@@ -169,8 +204,17 @@ def generate_launch_description():
         error_alpha_psi = LaunchConfiguration('error_filter_alpha_psi').perform(context)
         enable_frenet = LaunchConfiguration('enable_frenet_planner').perform(context)
         frenet_rate = LaunchConfiguration('frenet_publish_rate_hz').perform(context)
+        frenet_target_speed = LaunchConfiguration('frenet_target_speed').perform(context)
+        frenet_v_min = LaunchConfiguration('frenet_v_min').perform(context)
+        frenet_v_max = LaunchConfiguration('frenet_v_max').perform(context)
         frenet_d_min = LaunchConfiguration('frenet_d_min').perform(context)
         frenet_d_max = LaunchConfiguration('frenet_d_max').perform(context)
+        frenet_max_heading_jump = LaunchConfiguration('frenet_max_heading_jump').perform(context)
+        frenet_min_progress_step = LaunchConfiguration('frenet_min_progress_step_m').perform(context)
+        frenet_reuse_timeout = LaunchConfiguration('frenet_reuse_last_candidate_timeout_s').perform(context)
+        frenet_projection_search_window = LaunchConfiguration(
+            'frenet_projection_search_window_m'
+        ).perform(context)
         frenet_inflation = LaunchConfiguration('frenet_grid_inflation_radius_m').perform(context)
         frenet_resolution = LaunchConfiguration('frenet_grid_resolution_m').perform(context)
         traj_mode = LaunchConfiguration('trajectory_mode').perform(context)
@@ -219,10 +263,15 @@ def generate_launch_description():
                 '-p', 'map_topic:=/map',
                 '-p', 'frame_id:=map',
                 '-p', f'publish_rate_hz:={frenet_rate}',
-                '-p', f'target_speed:={target_speed}',
-                '-p', f'v_max:={target_speed}',
+                '-p', f'target_speed:={frenet_target_speed}',
+                '-p', f'v_min:={frenet_v_min}',
+                '-p', f'v_max:={frenet_v_max}',
                 '-p', f'd_min:={frenet_d_min}',
                 '-p', f'd_max:={frenet_d_max}',
+                '-p', f'max_heading_jump:={frenet_max_heading_jump}',
+                '-p', f'min_progress_step_m:={frenet_min_progress_step}',
+                '-p', f'reuse_last_candidate_timeout_s:={frenet_reuse_timeout}',
+                '-p', f'projection_search_window_m:={frenet_projection_search_window}',
                 '-p', f'grid_inflation_radius_m:={frenet_inflation}',
                 '-p', f'grid_resolution_m:={frenet_resolution}',
             ],
@@ -282,7 +331,7 @@ def generate_launch_description():
         return processes
 
     ld = LaunchDescription(launch_args)
-    ld.add_action(bridge_node)
+    ld.add_action(OpaqueFunction(function=create_bridge_node))
     ld.add_action(rviz_node)
     ld.add_action(nav_lifecycle_node)
     ld.add_action(map_server_node)

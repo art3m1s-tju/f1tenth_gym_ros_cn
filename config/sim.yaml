@@ -49,9 +49,9 @@ bridge:
     num_agent: 1
 
     # ego starting pose on map (update after running generate_track.py)
-    sx: 0.0
-    sy: 0.0
-    stheta: 0.0
+    sx: -1.9983431
+    sy: -0.9249948
+    stheta: 1.6816714
 
     # opp starting pose on map
     sx1: 2.0

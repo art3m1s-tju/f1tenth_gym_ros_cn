@@ -81,9 +81,9 @@ class GymBridge(Node):
                             lidar_dist=self.get_parameter("scan_distance_to_base_link").value
                             )
 
-        sx = self.get_parameter('sx').value
-        sy = self.get_parameter('sy').value
-        stheta = self.get_parameter('stheta').value
+        sx = float(self.get_parameter('sx').value)
+        sy = float(self.get_parameter('sy').value)
+        stheta = float(self.get_parameter('stheta').value)
         self.ego_pose = [sx, sy, stheta]
         self.ego_speed = [0.0, 0.0, 0.0]
         self.ego_requested_speed = 0.0
@@ -103,9 +103,9 @@ class GymBridge(Node):
         if num_agents == 2:
             self.has_opp = True
             self.opp_namespace = self.get_parameter('opp_namespace').value
-            sx1 = self.get_parameter('sx1').value
-            sy1 = self.get_parameter('sy1').value
-            stheta1 = self.get_parameter('stheta1').value
+            sx1 = float(self.get_parameter('sx1').value)
+            sy1 = float(self.get_parameter('sy1').value)
+            stheta1 = float(self.get_parameter('stheta1').value)
             self.opp_pose = [sx1, sy1, stheta1]
             self.opp_speed = [0.0, 0.0, 0.0]
             self.opp_requested_speed = 0.0
@@ -125,6 +125,11 @@ class GymBridge(Node):
             self.has_opp = False
             self.obs, _ , self.done, _ = self.env.reset(np.array([[sx, sy, stheta]]))
             self.ego_scan = list(self.obs['scans'][0])
+
+        self.get_logger().info(
+            f"Gym bridge initialized with map={self.get_parameter('map_path').value}, "
+            f"ego_start=({sx:.3f}, {sy:.3f}, {stheta:.3f})"
+        )
 
         # sim physical step timer
         self.drive_timer = self.create_timer(0.01, self.drive_timer_callback)

@@ -49,6 +49,8 @@ s_ddot(tf) = 0
 
 规划器订阅 `/scan`，把雷达命中点放到车辆局部坐标系中。
 
+实现里会忽略 `0.0m` 或近似 `0.0m` 的无效 `LaserScan` 回波。这一点很重要，因为部分仿真或驱动会用 `0` 表示“没有返回”，如果把它当成真实障碍，车辆前方会被错误标成碰撞区，Frenet 会表现成“所有候选都撞墙”。
+
 默认局部栅格参数：
 
 | 参数 | 默认值 | 说明 |
@@ -95,13 +97,21 @@ python3 code/run_frenet_planner.py
 | `/ego_racecar/odom` | 输入 | 车辆位姿和速度 |
 | `/scan` | 输入 | 2D 雷达 |
 | `/local_trajectory` | 输出 | Frenet 局部避障轨迹 |
+| `/frenet/debug/candidates` | 输出 | Frenet 安全候选轨迹 MarkerArray，可在 RViz 中对比最佳轨迹与备选轨迹 |
 
 主要参数：
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `frenet_d_min` | `-1.0` | 候选轨迹最小横向偏移 |
-| `frenet_d_max` | `1.0` | 候选轨迹最大横向偏移 |
+| `frenet_d_min` | `-1.8` | 候选轨迹最小横向偏移 |
+| `frenet_d_max` | `1.8` | 候选轨迹最大横向偏移 |
+| `frenet_target_speed` | `1.5` | Frenet 代价函数使用的目标终点速度，独立于 LQR 巡航速度 |
+| `frenet_v_min` | `0.6` | Frenet 纵向终点速度采样下界 |
+| `frenet_v_max` | `2.5` | Frenet 纵向终点速度采样上界 |
+| `frenet_max_heading_jump` | `0.85` | 单条候选轨迹相邻段允许的最大航向跳变（rad） |
+| `frenet_min_progress_step_m` | `0.20` | 单条候选轨迹从起点到终点的最小总前向推进距离 |
+| `frenet_reuse_last_candidate_timeout_s` | `1.0` | 当前周期无解时，允许继续复用最近一条安全局部轨迹的最长时长 |
+| `frenet_projection_search_window_m` | `6.0` | Frenet 在闭环参考线中围绕上一帧 `s` 保持投影连续性的弧长搜索窗口 |
 | `frenet_grid_inflation_radius_m` | `0.28` | 障碍膨胀半径 |
 | `frenet_grid_resolution_m` | `0.05` | 局部栅格分辨率 |
 
@@ -120,6 +130,15 @@ path_closed_loop:=false
 ```
 
 局部轨迹不是闭环，不能让 LQR 把最后一个点连接回第一个点。
+
+## RViz 调试可视化
+
+`launch/gym_bridge.rviz` 已加入两层 Frenet 可视化：
+
+- `/local_trajectory`：当前发布给 LQR 的局部轨迹。
+- `/frenet/debug/candidates`：安全候选轨迹集合，其中更粗更亮的线表示当前选中的最佳轨迹。
+
+如果你怀疑局部规划结果突然折返或贴墙，优先同时观察这两个 topic：前者回答“LQR 正在跟哪条线”，后者回答“Frenet 当时有哪些可行备选”。二者一起看，能很快分清问题是在候选生成、候选打分，还是控制跟踪。
 
 ## 控制预瞄说明
 
@@ -201,10 +220,18 @@ ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
   map_path:=/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/two_blocks_seed7 \
   enable_frenet_planner:=true \
   lqr_lookahead_distance_m:=0.0 \
-  frenet_d_min:=-1.0 \
-  frenet_d_max:=1.0 \
+  frenet_d_min:=-1.8 \
+  frenet_d_max:=1.8 \
   frenet_grid_inflation_radius_m:=0.28
 ```
+
+如果切换到自定义 Frenet 测试赛道，建议同时通过 launch 参数覆盖起始位姿，而不是反复手改 `config/sim.yaml`：
+
+```bash
+sx:=0.0 sy:=5.0 stheta:=3.1416
+```
+
+`pnc_sim_launch.py` 现已支持直接覆盖 `sx` / `sy` / `stheta`。当前 launch 会先生成一份带覆盖值的临时 bridge 配置，再启动 `gym_bridge`，避免出现“命令行看起来改了，但 simulator 实际仍然沿用 `sim.yaml` 默认地图和默认起点”的问题。
 
 预期现象：
 
@@ -212,6 +239,10 @@ ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
 - Frenet：`/local_trajectory` 会绕开膨胀栅格中的方块，LQR 跟踪局部轨迹。
 
 Frenet 默认预测时间固定为 `2.0s`，局部轨迹通常是 21 个点，避免 LQR 频繁跟踪过短轨迹。
+
+`frenet_target_speed` / `frenet_v_min` / `frenet_v_max` 不再和 LQR 的 `target_speed` 绑死。这样即使控制器当前巡航速度设置得偏低，Frenet 也仍然可以用更合理的前向采样范围生成空间上足够平滑的候选轨迹。
+
+`frenet_projection_search_window_m` 用于避免回环赛道上的投影串支路。对存在平行直道的闭环赛道，这个参数非常重要；如果只按欧式最近点投影，Frenet 可能会突然跳到另一条支路，导致横向偏移 `d` 瞬间变成不合理的大值。
 
 如果终端出现：
 
@@ -222,8 +253,12 @@ No safe Frenet candidate; publishing stop path
 说明当前局部栅格里所有候选轨迹都被碰撞检测剔除了。括号里的 `total`、`safe`、`collision_reject`、`best_clearance` 和 `occupied_cells` 用来判断是障碍膨胀太保守、横向采样范围不够，还是地图边界已经把可行空间堵住。第一步可以尝试：
 
 ```bash
-frenet_grid_inflation_radius_m:=0.22 frenet_d_min:=-1.2 frenet_d_max:=1.2
+frenet_grid_inflation_radius_m:=0.22 frenet_d_min:=-1.8 frenet_d_max:=1.8
 ```
+
+如果 `occupied_cells` 明显偏高，但 RViz 里又看不到对应障碍，下一步优先检查 `/scan` 是否包含大量 `0.0` range。现在规划器会过滤这些零值回波；如果你本地分支里还没带这个修复，日志上通常会表现为 `collision_reject` 快速打满、`best_clearance` 接近 `0.0m`。
+
+如果日志偶尔出现当前周期 `No safe Frenet candidate`，但前后几个周期又能恢复 21 点局部轨迹，规划器现在会优先短时复用上一条安全 Frenet 轨迹，而不是立刻退回 3 点停车路径。这个机制主要用于吸收瞬时 scan 抖动或局部几何判定抖动，不替代真正的候选生成修复。
 
 ## 调试建议
 
@@ -236,6 +271,20 @@ frenet_grid_inflation_radius_m:=0.22 frenet_d_min:=-1.2 frenet_d_max:=1.2
 把障碍放在起点后较近的全局轨迹前方。
 
 即使雷达没有扫到方块，Frenet 规划器现在也会读取 `/map`，把静态地图边界和黑色方块加入局部占用栅格，避免直接规划到墙里。
+
+## 推荐验证赛道
+
+为了单独验证 Frenet 避障，而不是把问题混进复杂赛道几何里，当前新增了一组更干净的测试赛道：
+
+- `maps/frenet_test_loop_open.yaml`
+- `maps/generated_static_obstacles/frenet_test_open_two_blocks.yaml`
+- `code/outputs/generated_tracks/frenet_test_open_two_blocks_review.png`
+
+这组地图是开阔的回环赛道，两个静态方块都放在可绕行区域内，适合直接观察：
+
+- Frenet 候选是否会稳定分到障碍两侧。
+- 最佳候选是否会突然贴外墙。
+- `No safe Frenet candidate` 是否真的是环境无解，而不是感知栅格构建错误。
 
 ## 验证记录
 

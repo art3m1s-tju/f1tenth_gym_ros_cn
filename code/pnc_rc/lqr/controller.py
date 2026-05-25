@@ -409,6 +409,8 @@ class LqrController(Node):
             self.get_logger().warning("Ignoring path with fewer than 2 poses.")
             return
 
+        reset_controller_state = self.points is None or self.path_closed_loop
+
         self.points = points
         self.headings = compute_path_headings(points, self.path_closed_loop)
         self.curvatures = compute_path_curvatures(points, self.path_closed_loop)
@@ -416,9 +418,10 @@ class LqrController(Node):
         self.kdtree = KDTree(points)
         self.path_frame_id = msg.header.frame_id or self.tracked_frame or "map"
         self.open_loop_finished = False
-        self.previous_delta_cmd = 0.0
-        self.filtered_lateral_error = None
-        self.filtered_heading_error = None
+        if reset_controller_state:
+            self.previous_delta_cmd = 0.0
+            self.filtered_lateral_error = None
+            self.filtered_heading_error = None
         self.get_logger().info(
             f"Loaded LQR reference path with {len(points)} points "
             f"(frame={self.path_frame_id}, closed_loop={self.path_closed_loop})."
