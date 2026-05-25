@@ -26,6 +26,7 @@ from pnc_rc.frenet.planner import (
     initial_frenet_state,
     local_static_map_occupancy,
     plan_frenet_path,
+    trim_path_to_position,
 )
 
 
@@ -66,6 +67,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("min_clearance_m", 0.05)
         self.declare_parameter("corridor_radius_m", 0.14)
         self.declare_parameter("corridor_sample_step_m", 0.10)
+        self.declare_parameter("path_collision_sample_step_m", 0.05)
         self.declare_parameter("footprint_front_m", 0.38)
         self.declare_parameter("footprint_rear_m", 0.05)
         self.declare_parameter("max_heading_jump", 0.65)
@@ -81,6 +83,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("reuse_last_candidate_timeout_s", 1.0)
         self.declare_parameter("projection_search_window_m", 6.0)
         self.declare_parameter("stop_path_length_m", 0.25)
+        self.declare_parameter("min_published_path_length_m", 0.75)
         self.declare_parameter("reference_closed_loop", True)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
@@ -102,6 +105,9 @@ class FrenetStaticObstaclePlanner(Node):
             corridor_radius_m=float(self.get_parameter("corridor_radius_m").value),
             corridor_sample_step_m=float(
                 self.get_parameter("corridor_sample_step_m").value
+            ),
+            path_collision_sample_step_m=float(
+                self.get_parameter("path_collision_sample_step_m").value
             ),
             footprint_front_m=float(self.get_parameter("footprint_front_m").value),
             footprint_rear_m=float(self.get_parameter("footprint_rear_m").value),
@@ -182,6 +188,10 @@ class FrenetStaticObstaclePlanner(Node):
             0.05,
             float(self.get_parameter("stop_path_length_m").value),
         )
+        self.min_published_path_length_m = max(
+            0.0,
+            float(self.get_parameter("min_published_path_length_m").value),
+        )
         publish_rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
         self.timer = self.create_timer(1.0 / publish_rate, self.plan_once)
         self.last_safe_candidate_xy: np.ndarray | None = None
@@ -189,6 +199,9 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_reuse_log_time = 0.0
         self.previous_s: float | None = None
         self.reference_closed_loop = bool(self.get_parameter("reference_closed_loop").value)
+        self.last_plan_elapsed_sec = 0.0
+        self.last_plan_timing_log_time = 0.0
+        self.last_path_drop_log_time = 0.0
         self.previous_odom_position: np.ndarray | None = None
         self.previous_odom_time: float | None = None
         self.previous_odom_wall_time: float | None = None
@@ -243,6 +256,7 @@ class FrenetStaticObstaclePlanner(Node):
     def plan_once(self) -> None:
         if self.reference is None or self.latest_odom is None:
             return
+        plan_start = time.perf_counter()
         stamp = self.get_clock().now().to_msg()
         position, yaw, velocity_xy = self._odom_state(self.latest_odom)
         now = time.monotonic()
@@ -289,7 +303,16 @@ class FrenetStaticObstaclePlanner(Node):
             stats,
             debug_candidates=debug_candidates,
         )
+        publish_position, publish_yaw = self._odom_pose(self.latest_odom)
+        fresh_s, _, _, _ = self.reference.project_near(
+            publish_position,
+            state.s,
+            self.projection_search_window_m,
+        )
+        self.previous_s = fresh_s
         if candidate is None:
+            self.last_plan_elapsed_sec = time.perf_counter() - plan_start
+            self._log_plan_timing(now, stats, self.last_plan_elapsed_sec)
             if self._reuse_last_candidate_if_fresh(stamp, now, occupancy, vehicle_pose):
                 self.publish_debug_markers(stamp, [], None)
                 return
@@ -302,12 +325,29 @@ class FrenetStaticObstaclePlanner(Node):
                 scan,
             )
             self.publish_debug_markers(stamp, [], None)
-            self.publish_stop_path(stamp, position, yaw)
+            self.publish_stop_path(stamp, publish_position, publish_yaw)
+            return
+        self.last_plan_elapsed_sec = time.perf_counter() - plan_start
+        self._log_plan_timing(now, stats, self.last_plan_elapsed_sec)
+        anchored_candidate = trim_path_to_position(
+            candidate.xy,
+            publish_position,
+            self.min_published_path_length_m,
+        )
+        if len(anchored_candidate) < 2:
+            if now - self.last_path_drop_log_time >= 0.5:
+                self.last_path_drop_log_time = now
+                self.get_logger().warning(
+                    "Discarding Frenet candidate because the anchored path is too short "
+                    f"(plan_time={self.last_plan_elapsed_sec:.3f}s)."
+                )
+            self.publish_debug_markers(stamp, debug_candidates, candidate)
+            self.publish_stop_path(stamp, publish_position, publish_yaw)
             return
         self.last_safe_candidate_xy = np.asarray(candidate.xy, dtype=float).copy()
         self.last_safe_candidate_time = now
         self.publish_debug_markers(stamp, debug_candidates, candidate)
-        self.publish_path(stamp, candidate.xy)
+        self.publish_path(stamp, anchored_candidate)
 
     def log_no_candidate(
         self,
@@ -406,6 +446,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.planner_config.corridor_sample_step_m,
             self.planner_config.footprint_front_m,
             self.planner_config.footprint_rear_m,
+            self.planner_config.path_collision_sample_step_m,
         )
         if collision or min_clearance < self.planner_config.min_clearance_m:
             if now - self.last_reuse_log_time >= 0.5:
@@ -416,13 +457,31 @@ class FrenetStaticObstaclePlanner(Node):
                     f"clearance={min_clearance:.2f}m)."
                 )
             return False
+        if self.latest_odom is not None:
+            publish_position, publish_yaw = self._odom_pose(self.latest_odom)
+        else:
+            publish_position = np.array([vehicle_pose[0], vehicle_pose[1]], dtype=float)
+            publish_yaw = float(vehicle_pose[2])
+        published_path = trim_path_to_position(
+            self.last_safe_candidate_xy,
+            publish_position,
+            self.min_published_path_length_m,
+        )
+        if len(published_path) < 2:
+            if now - self.last_path_drop_log_time >= 0.5:
+                self.last_path_drop_log_time = now
+                self.get_logger().warning(
+                    "Discarding reused Frenet candidate because the anchored path is too short "
+                    f"(age={age:.2f}s)."
+                )
+            return False
         if now - self.last_reuse_log_time >= 0.5:
             self.last_reuse_log_time = now
             self.get_logger().warning(
                 "No safe Frenet candidate in current cycle; reusing last safe path "
                 f"(age={age:.2f}s, clearance={min_clearance:.2f}m)."
             )
-        self.publish_path(stamp, self.last_safe_candidate_xy)
+        self.publish_path(stamp, published_path)
         return True
 
     def _delete_all_marker(self, stamp) -> Marker:
@@ -469,9 +528,8 @@ class FrenetStaticObstaclePlanner(Node):
             self.grid_config,
         )
 
-    def _odom_state(self, msg: Odometry) -> tuple[np.ndarray, float, np.ndarray]:
+    def _odom_pose(self, msg: Odometry) -> tuple[np.ndarray, float]:
         pose = msg.pose.pose
-        twist = msg.twist.twist
         yaw = quaternion_to_yaw(
             pose.orientation.x,
             pose.orientation.y,
@@ -479,6 +537,12 @@ class FrenetStaticObstaclePlanner(Node):
             pose.orientation.w,
         )
         position = np.array([pose.position.x, pose.position.y], dtype=float)
+        return position, yaw
+
+    def _odom_state(self, msg: Odometry) -> tuple[np.ndarray, float, np.ndarray]:
+        pose = msg.pose.pose
+        twist = msg.twist.twist
+        position, yaw = self._odom_pose(msg)
         velocity_xy = self.previous_velocity_xy.copy()
         stamp_sec = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         wall_time = time.monotonic()
@@ -498,6 +562,23 @@ class FrenetStaticObstaclePlanner(Node):
         self.previous_odom_time = stamp_sec
         self.previous_odom_wall_time = wall_time
         return position, yaw, velocity_xy
+
+    def _log_plan_timing(
+        self,
+        now: float,
+        stats: FrenetPlanStats,
+        elapsed_sec: float,
+    ) -> None:
+        if now - self.last_plan_timing_log_time < 0.5:
+            return
+        self.last_plan_timing_log_time = now
+        self.get_logger().info(
+            "Frenet planning cycle "
+            f"elapsed={elapsed_sec:.3f}s, total={stats.total_candidates}, "
+            f"safe={stats.safe_candidates}, collision_reject={stats.collision_rejections}, "
+            f"clearance_reject={stats.clearance_rejections}, heading_reject={stats.heading_rejections}, "
+            f"curvature_reject={stats.curvature_rejections}."
+        )
 
 
 def main(args=None) -> None:

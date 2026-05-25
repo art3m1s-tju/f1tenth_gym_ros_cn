@@ -273,8 +273,20 @@ class GymBridge(Node):
 
     def _update_sim_state(self):
         self.ego_scan = list(self.obs['scans'][0])
+        collisions = self.obs.get('collisions') if isinstance(self.obs, dict) else None
+        if collisions is not None:
+            ego_collision_now = bool(collisions[0])
+            if ego_collision_now and not self.ego_collision:
+                self.get_logger().warning(
+                    f"Ego collision detected at "
+                    f"({float(self.obs['poses_x'][0]):.3f}, "
+                    f"{float(self.obs['poses_y'][0]):.3f})."
+                )
+            self.ego_collision = ego_collision_now
         if self.has_opp:
             self.opp_scan = list(self.obs['scans'][1])
+            if collisions is not None:
+                self.opp_collision = bool(collisions[1])
             self.opp_pose[0] = self.obs['poses_x'][1]
             self.opp_pose[1] = self.obs['poses_y'][1]
             self.opp_pose[2] = self.obs['poses_theta'][1]

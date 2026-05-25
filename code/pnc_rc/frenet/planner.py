@@ -44,6 +44,7 @@ class FrenetPlannerConfig:
     min_clearance_m: float = 0.05
     corridor_radius_m: float = 0.14
     corridor_sample_step_m: float = 0.10
+    path_collision_sample_step_m: float = 0.05
     footprint_front_m: float = 0.38
     footprint_rear_m: float = 0.05
     weight_lateral_jerk: float = 0.15
@@ -287,11 +288,13 @@ class OccupancyGrid:
         corridor_sample_step_m: float = 0.10,
         footprint_front_m: float = 0.0,
         footprint_rear_m: float = 0.0,
+        path_sample_step_m: float = 0.05,
     ) -> tuple[bool, float]:
         if len(xy_points) == 0:
             return False, float("inf")
+        dense_points = densify_path_points(xy_points, path_sample_step_m)
         query_points = swept_corridor_points(
-            xy_points,
+            dense_points,
             corridor_radius_m,
             corridor_sample_step_m,
             footprint_front_m,
@@ -529,6 +532,7 @@ def plan_frenet_path(
                     config.corridor_sample_step_m,
                     config.footprint_front_m,
                     config.footprint_rear_m,
+                    config.path_collision_sample_step_m,
                 )
                 if stats is not None:
                     stats.best_clearance_m = max(stats.best_clearance_m, min_clearance)
@@ -761,6 +765,62 @@ def swept_corridor_points(
         + offsets[None, None, :, None] * normals[:, None, None, :]
     )
     return expanded.reshape(-1, 2)
+
+
+def densify_path_points(points: np.ndarray, max_step_m: float) -> np.ndarray:
+    points = np.asarray(points, dtype=float)
+    if len(points) < 2:
+        return points.reshape(-1, 2)
+    max_step = float(max_step_m)
+    if max_step <= 0.0:
+        return points
+
+    dense_points = [points[0]]
+    for start, end in zip(points[:-1], points[1:]):
+        delta = end - start
+        distance = float(np.linalg.norm(delta))
+        if distance <= 1e-12:
+            continue
+        subdivisions = max(1, int(math.ceil(distance / max_step)))
+        for step_idx in range(1, subdivisions + 1):
+            dense_points.append(start + (step_idx / subdivisions) * delta)
+    return np.asarray(dense_points, dtype=float)
+
+
+def trim_path_to_position(
+    points: np.ndarray,
+    position: np.ndarray,
+    min_remaining_length_m: float = 0.0,
+) -> np.ndarray:
+    points = np.asarray(points, dtype=float)
+    if len(points) < 2:
+        return points.reshape(-1, 2)
+
+    headings = estimate_path_headings(points)
+    curvatures = compute_path_curvatures(points, closed_loop=False)
+    kdtree = KDTree(points)
+    projection = project_to_path(
+        np.asarray(position, dtype=float),
+        points,
+        kdtree,
+        headings,
+        curvatures,
+        closed_loop=False,
+    )
+
+    anchor = np.asarray(projection.point, dtype=float).reshape(1, 2)
+    remaining_points = points[min(projection.segment_idx + 1, len(points) - 1) :]
+    trimmed = np.vstack([anchor, remaining_points])
+    if polyline_length(trimmed) < max(0.0, float(min_remaining_length_m)):
+        return np.empty((0, 2), dtype=float)
+    return trimmed
+
+
+def polyline_length(points: np.ndarray) -> float:
+    points = np.asarray(points, dtype=float)
+    if len(points) < 2:
+        return 0.0
+    return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
 
 
 def estimate_path_headings(points: np.ndarray) -> np.ndarray:

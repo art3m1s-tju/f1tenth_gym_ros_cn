@@ -100,6 +100,7 @@ class TrajectoryCache:
         yaws: CSV 中读取的参考航向角数组。
         headings: 由轨迹点计算出的路径切向航向角数组。
         curvatures: 由轨迹点计算出的路径曲率数组。
+        segment_lengths: 每个闭环路径段长度。
         kdtree: 用于最近邻投影查询的 KDTree。
         path_length: 轨迹总长度估计值。
     """
@@ -108,6 +109,7 @@ class TrajectoryCache:
     yaws: np.ndarray
     headings: np.ndarray
     curvatures: np.ndarray
+    segment_lengths: np.ndarray
     kdtree: KDTree
     path_length: float
 
@@ -131,13 +133,14 @@ def load_trajectory_cache(csv_path: str) -> TrajectoryCache:
             yaws.append(float(row["yaw"]))
     pts = np.array(points, dtype=float)
     yw = np.array(yaws, dtype=float)
-    diffs = np.diff(pts, axis=0)
-    path_length = float(np.sum(np.linalg.norm(diffs, axis=1)))
+    segment_lengths = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
+    path_length = float(np.sum(segment_lengths))
     return TrajectoryCache(
         points=pts,
         yaws=yw,
         headings=compute_path_headings(pts, closed_loop=True),
         curvatures=compute_path_curvatures(pts, closed_loop=True),
+        segment_lengths=segment_lengths,
         kdtree=KDTree(pts),
         path_length=path_length,
     )
@@ -172,6 +175,7 @@ def run_single_sim(
     points = trajectory_cache.points
     headings = trajectory_cache.headings
     curvatures = trajectory_cache.curvatures
+    segment_lengths = trajectory_cache.segment_lengths
     kdtree = trajectory_cache.kdtree
     path_length = trajectory_cache.path_length
 

@@ -391,3 +391,124 @@ ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
 
 - 地图 override、Frenet 单元逻辑、动态可跟踪性、车身安全走廊、复用路径校验和 rolling local path 的 LQR endpoint 语义已经修到位。
 - 这不等价于所有可能地图都已经实车级验证；后续如果换回更窄/更复杂赛道，需要重新看 `clearance_reject/collision_reject/curvature_reject` 的占比。
+
+## 2026-05-26 复核：障碍膨胀语义
+
+用户指出：真实赛场不应依赖预先知道的障碍物中心点，而应对雷达在线检测到的障碍物边缘/占据栅格做膨胀。
+
+复核结论：
+
+- 这个判断是正确的；实车/真实赛场语义应该是“占据栅格膨胀”，不是“障碍物中心点膨胀”。
+- 当前 Frenet planner 的实现实际也是对 raw occupied cells 膨胀，而不是读取 `.json` 中的障碍物中心点参与规划。
+- `.json` 里的 `center_x_m/center_y_m` 只用于复现实验和离线分析障碍物位置；在线规划代码没有用这些中心点构造障碍物。
+- `build_occupancy_grid()` 会先把 `LaserScan` 有效测距端点投到局部栅格，形成 raw occupied cells；如果静态地图可用，也会把局部 static occupied cells 合并进去。
+- 随后通过 `ndimage.distance_transform_edt(~raw)` 计算到 raw occupied cells 的距离，并用 `distance_to_raw <= inflation_radius_m` 生成 inflated occupied grid。
+
+因此，当前碰撞风险的主要问题不是“错误地对中心点膨胀”，而是：
+
+- 对 LaserScan 端点/静态地图占据格子的膨胀半径偏小；
+- hard clearance margin 偏小；
+- 轨迹 collision check 只检查离散轨迹点展开后的 footprint/corridor，没有先沿轨迹段做连续空间加密；
+- 当前日志没有 signed longitudinal velocity，无法直接用 CSV 判断用户在 RViz 看到的反弹/速度变号。
+
+下一步修复仍应围绕连续 swept collision check、采样密度、硬安全裕度和 signed velocity 日志展开，而不是改成基于障碍物中心的逻辑。
+
+## 2026-05-26 修复：连续碰撞检测、诊断日志和保守测试 preset
+
+针对用户在 RViz 中看到“第一障碍物反弹/速度变号”的反馈，本轮按 review 结果继续修改。
+
+### 代码修改
+
+- `OccupancyGrid.query_path()` 在 footprint/corridor 展开前新增轨迹段空间加密，默认 `path_collision_sample_step_m=0.05m`。
+- 新增 `densify_path_points()`，避免只检查离散轨迹点导致“两个点之间穿过障碍物但未命中栅格”的漏检。
+- Frenet node 新增参数 `path_collision_sample_step_m`，并在候选路径检查和 last safe path 复查时同时使用。
+- Launch 新增可配置参数：
+  - `frenet_v_step`
+  - `frenet_d_step`
+  - `frenet_trajectory_dt`
+  - `frenet_corridor_sample_step_m`
+  - `frenet_path_collision_sample_step_m`
+  - `frenet_grid_forward_m`
+  - `frenet_grid_rear_m`
+  - `frenet_grid_half_width_m`
+- LQR tracking CSV 新增：
+  - `v_longitudinal_signed`
+  - `v_path_signed`
+- signed velocity 不再直接相信 gym odom twist 的坐标语义，而是优先用连续 odom 位姿差分投影到车体前向和路径切向。
+- `gym_bridge` 增加碰撞诊断：如果 gym obs 暴露 `collisions` 字段，首次 ego collision 会打印 `Ego collision detected at (...)`。
+- `sim_harness.py` 修复 `segment_lengths` 未定义问题，`TrajectoryCache` 现在保存闭环路径段长度，离线 LQR harness 的 lookahead 投影可正常引用。
+- `run_frenet_test.sh` 调整为更保守的一键验证 preset：
+  - LQR `target_speed=0.55m/s`
+  - LQR `max_lateral_accel=1.0`
+  - Frenet 几何 horizon 与跟踪速度解耦，使用 `frenet_t_min=4.0`、`frenet_t_max=6.0`、`frenet_target_speed=1.2`
+  - `frenet_trajectory_dt=0.05`
+  - `frenet_path_collision_sample_step_m=0.03`
+  - `frenet_grid_inflation_radius_m=0.45`
+  - `frenet_corridor_radius_m=0.25`
+  - `frenet_safe_clearance_m=0.60`
+  - `frenet_min_clearance_m=0.15`
+  - `frenet_reuse_last_candidate_timeout_s=0.0`
+
+### 新增测试
+
+- `test_densify_path_limits_segment_spacing`
+- `test_occupancy_grid_detects_obstacle_between_sparse_path_points`
+
+第二个测试明确覆盖之前的核心漏检：障碍物位于两个稀疏轨迹点之间时，关闭 path densify 会漏检，开启 path densify 必须检测到 collision。
+
+### 验证过程
+
+容器内单元测试：
+
+```text
+21 passed in 0.21s
+```
+
+同时通过：
+
+```text
+python3 -m py_compile code/lqr_sweep/sim_harness.py
+```
+
+第一次保守低速 preset 验证失败，输出：
+
+```text
+Ego collision detected at (-5.376, 5.316).
+```
+
+原因分析：
+
+- LQR 速度降到了 `0.55m/s`，但 Frenet 几何采样也随之偏短；
+- 低速 `frenet_target_speed=0.7`、`t_max=5.0` 只覆盖约 `3.5m`；
+- 第一障碍物约在起点前方 `6m`，因此规划器太晚才把第一个障碍物纳入候选路径碰撞评估。
+
+修正后将 Frenet 几何 horizon 与 LQR 跟踪速度解耦：
+
+- LQR 继续慢速跟踪；
+- Frenet 使用更长、更快的纵向采样生成远距绕障几何。
+
+最终 headless 验证：
+
+```text
+21 passed in 0.23s
+```
+
+launch 输出未再出现 `Ego collision detected`。
+
+本次 `code/outputs/logs/lqr_tracking_log.csv` 复核结果：
+
+```text
+rows: 1960
+min_dist_to_first_obstacle_center: 0.472m
+negative_longitudinal_count: 0
+negative_path_count: 0
+max_abs_curvature_ref: 1.247
+max_abs_curvature_preview: 1.524
+```
+
+当前结论：
+
+- 第一障碍物反弹问题在当前 headless preset 下已消失；
+- CSV 已能直接检查 signed velocity 是否变负；
+- `gym_bridge` 已能在真实 gym collision 时打印 warning；
+- 仍建议后续继续降低局部轨迹曲率尖峰，当前 LQR 侧看到的最大曲率仍略高于 Frenet 的 `1.1 1/m` 目标，虽然本次未触发碰撞。

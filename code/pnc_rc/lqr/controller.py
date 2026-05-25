@@ -275,6 +275,7 @@ class LqrController(Node):
         self.kdtree: KDTree | None = None  # 路径点空间索引
         self.path_frame_id = "map"
         self.previous_stamp_sec: float | None = None
+        self.previous_position_for_velocity: np.ndarray | None = None
         self.previous_delta_cmd = 0.0
         self.current_speed_cmd = 0.0  # 速度斜坡当前值
         self.open_loop_finished = False
@@ -361,6 +362,8 @@ class LqrController(Node):
                 "y",
                 "yaw",
                 "v_actual",
+                "v_longitudinal_signed",
+                "v_path_signed",
                 "v_cmd",
                 "e_y",
                 "e_psi",
@@ -696,6 +699,8 @@ class LqrController(Node):
         position: np.ndarray,
         yaw: float,
         v_actual: float,
+        v_longitudinal_signed: float,
+        v_path_signed: float,
         v_cmd: float,
         lateral_error: float,
         heading_error: float,
@@ -724,6 +729,8 @@ class LqrController(Node):
                 f"{position[1]:.6f}",
                 f"{yaw:.6f}",
                 f"{v_actual:.6f}",
+                f"{v_longitudinal_signed:.6f}",
+                f"{v_path_signed:.6f}",
                 f"{v_cmd:.6f}",
                 f"{lateral_error:.6f}",
                 f"{heading_error:.6f}",
@@ -811,6 +818,28 @@ class LqrController(Node):
         )
         sample = self._sample_reference(control_position)
         truth_sample = self._sample_reference(position)
+        truth_tangent = np.array(
+            [math.cos(truth_sample.heading), math.sin(truth_sample.heading)],
+            dtype=float,
+        )
+
+        heading_vector = np.array([math.cos(yaw), math.sin(yaw)], dtype=float)
+        velocity_xy_map = np.array(
+            [
+                math.cos(yaw) * vx - math.sin(yaw) * vy,
+                math.sin(yaw) * vx + math.cos(yaw) * vy,
+            ],
+            dtype=float,
+        )
+        if (
+            self.previous_position_for_velocity is not None
+            and self.previous_stamp_sec is not None
+        ):
+            velocity_dt = stamp_sec - self.previous_stamp_sec
+            if 1e-4 <= velocity_dt <= 0.5:
+                velocity_xy_map = (position - self.previous_position_for_velocity) / velocity_dt
+        v_longitudinal_signed = float(velocity_xy_map @ heading_vector)
+        v_path_signed = float(velocity_xy_map @ truth_tangent)
 
         normal = np.array([-math.sin(sample.heading), math.cos(sample.heading)])
         raw_lateral_error = float((control_position - sample.point) @ normal)
@@ -879,6 +908,8 @@ class LqrController(Node):
             position=position,
             yaw=yaw,
             v_actual=v_actual,
+            v_longitudinal_signed=v_longitudinal_signed,
+            v_path_signed=v_path_signed,
             v_cmd=v_cmd,
             lateral_error=truth_lateral_error,
             heading_error=truth_heading_error,
@@ -897,6 +928,7 @@ class LqrController(Node):
             compute_time_ms=compute_time_ms,
         )
         self.previous_stamp_sec = stamp_sec
+        self.previous_position_for_velocity = position.copy()
 
     def _open_loop_finished(self, position: np.ndarray) -> bool:
         """判断开环路径是否已到达终点。"""

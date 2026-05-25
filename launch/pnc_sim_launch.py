@@ -72,15 +72,20 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_target_speed', default_value='1.5'),
         DeclareLaunchArgument('frenet_v_min', default_value='0.6'),
         DeclareLaunchArgument('frenet_v_max', default_value='2.5'),
+        DeclareLaunchArgument('frenet_v_step', default_value='0.3'),
         DeclareLaunchArgument('frenet_t_min', default_value='2.0'),
         DeclareLaunchArgument('frenet_t_max', default_value='3.0'),
         DeclareLaunchArgument('frenet_t_step', default_value='0.5'),
         DeclareLaunchArgument('frenet_d_min', default_value='-1.8'),
         DeclareLaunchArgument('frenet_d_max', default_value='1.8'),
+        DeclareLaunchArgument('frenet_d_step', default_value='0.1'),
+        DeclareLaunchArgument('frenet_trajectory_dt', default_value='0.1'),
         DeclareLaunchArgument('frenet_max_curvature', default_value='1.1'),
         DeclareLaunchArgument('frenet_safe_clearance_m', default_value='0.35'),
         DeclareLaunchArgument('frenet_min_clearance_m', default_value='0.05'),
         DeclareLaunchArgument('frenet_corridor_radius_m', default_value='0.14'),
+        DeclareLaunchArgument('frenet_corridor_sample_step_m', default_value='0.10'),
+        DeclareLaunchArgument('frenet_path_collision_sample_step_m', default_value='0.05'),
         DeclareLaunchArgument('frenet_footprint_front_m', default_value='0.38'),
         DeclareLaunchArgument('frenet_footprint_rear_m', default_value='0.05'),
         DeclareLaunchArgument('frenet_max_heading_jump', default_value='0.85'),
@@ -88,9 +93,13 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_reuse_last_candidate_timeout_s', default_value='1.0'),
         DeclareLaunchArgument('frenet_projection_search_window_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_stop_path_length_m', default_value='0.25'),
+        DeclareLaunchArgument('frenet_min_published_path_length_m', default_value='0.75'),
         DeclareLaunchArgument('frenet_reference_closed_loop', default_value='true'),
         DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
         DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
+        DeclareLaunchArgument('frenet_grid_forward_m', default_value='7.0'),
+        DeclareLaunchArgument('frenet_grid_rear_m', default_value='1.0'),
+        DeclareLaunchArgument('frenet_grid_half_width_m', default_value='3.0'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
         DeclareLaunchArgument('control_friendly_alpha', default_value='0.56'),
         DeclareLaunchArgument('control_friendly_auto_alpha', default_value='true'),
@@ -218,15 +227,24 @@ def generate_launch_description():
         frenet_target_speed = LaunchConfiguration('frenet_target_speed').perform(context)
         frenet_v_min = LaunchConfiguration('frenet_v_min').perform(context)
         frenet_v_max = LaunchConfiguration('frenet_v_max').perform(context)
+        frenet_v_step = LaunchConfiguration('frenet_v_step').perform(context)
         frenet_t_min = LaunchConfiguration('frenet_t_min').perform(context)
         frenet_t_max = LaunchConfiguration('frenet_t_max').perform(context)
         frenet_t_step = LaunchConfiguration('frenet_t_step').perform(context)
         frenet_d_min = LaunchConfiguration('frenet_d_min').perform(context)
         frenet_d_max = LaunchConfiguration('frenet_d_max').perform(context)
+        frenet_d_step = LaunchConfiguration('frenet_d_step').perform(context)
+        frenet_trajectory_dt = LaunchConfiguration('frenet_trajectory_dt').perform(context)
         frenet_max_curvature = LaunchConfiguration('frenet_max_curvature').perform(context)
         frenet_safe_clearance = LaunchConfiguration('frenet_safe_clearance_m').perform(context)
         frenet_min_clearance = LaunchConfiguration('frenet_min_clearance_m').perform(context)
         frenet_corridor_radius = LaunchConfiguration('frenet_corridor_radius_m').perform(context)
+        frenet_corridor_sample_step = LaunchConfiguration(
+            'frenet_corridor_sample_step_m'
+        ).perform(context)
+        frenet_path_collision_sample_step = LaunchConfiguration(
+            'frenet_path_collision_sample_step_m'
+        ).perform(context)
         frenet_footprint_front = LaunchConfiguration('frenet_footprint_front_m').perform(context)
         frenet_footprint_rear = LaunchConfiguration('frenet_footprint_rear_m').perform(context)
         frenet_max_heading_jump = LaunchConfiguration('frenet_max_heading_jump').perform(context)
@@ -236,11 +254,17 @@ def generate_launch_description():
             'frenet_projection_search_window_m'
         ).perform(context)
         frenet_stop_path_length = LaunchConfiguration('frenet_stop_path_length_m').perform(context)
+        frenet_min_published_path_length = LaunchConfiguration(
+            'frenet_min_published_path_length_m'
+        ).perform(context)
         frenet_reference_closed_loop = LaunchConfiguration(
             'frenet_reference_closed_loop'
         ).perform(context)
         frenet_inflation = LaunchConfiguration('frenet_grid_inflation_radius_m').perform(context)
         frenet_resolution = LaunchConfiguration('frenet_grid_resolution_m').perform(context)
+        frenet_grid_forward = LaunchConfiguration('frenet_grid_forward_m').perform(context)
+        frenet_grid_rear = LaunchConfiguration('frenet_grid_rear_m').perform(context)
+        frenet_grid_half_width = LaunchConfiguration('frenet_grid_half_width_m').perform(context)
         traj_mode = LaunchConfiguration('trajectory_mode').perform(context)
         cf_alpha = LaunchConfiguration('control_friendly_alpha').perform(context)
         cf_auto = LaunchConfiguration('control_friendly_auto_alpha').perform(context)
@@ -291,15 +315,20 @@ def generate_launch_description():
                 '-p', f'target_speed:={frenet_target_speed}',
                 '-p', f'v_min:={frenet_v_min}',
                 '-p', f'v_max:={frenet_v_max}',
+                '-p', f'v_step:={frenet_v_step}',
                 '-p', f't_min:={frenet_t_min}',
                 '-p', f't_max:={frenet_t_max}',
                 '-p', f't_step:={frenet_t_step}',
                 '-p', f'd_min:={frenet_d_min}',
                 '-p', f'd_max:={frenet_d_max}',
+                '-p', f'd_step:={frenet_d_step}',
+                '-p', f'trajectory_dt:={frenet_trajectory_dt}',
                 '-p', f'max_curvature:={frenet_max_curvature}',
                 '-p', f'safe_clearance_m:={frenet_safe_clearance}',
                 '-p', f'min_clearance_m:={frenet_min_clearance}',
                 '-p', f'corridor_radius_m:={frenet_corridor_radius}',
+                '-p', f'corridor_sample_step_m:={frenet_corridor_sample_step}',
+                '-p', f'path_collision_sample_step_m:={frenet_path_collision_sample_step}',
                 '-p', f'footprint_front_m:={frenet_footprint_front}',
                 '-p', f'footprint_rear_m:={frenet_footprint_rear}',
                 '-p', f'max_heading_jump:={frenet_max_heading_jump}',
@@ -307,9 +336,13 @@ def generate_launch_description():
                 '-p', f'reuse_last_candidate_timeout_s:={frenet_reuse_timeout}',
                 '-p', f'projection_search_window_m:={frenet_projection_search_window}',
                 '-p', f'stop_path_length_m:={frenet_stop_path_length}',
+                '-p', f'min_published_path_length_m:={frenet_min_published_path_length}',
                 '-p', f'reference_closed_loop:={frenet_reference_closed_loop}',
                 '-p', f'grid_inflation_radius_m:={frenet_inflation}',
                 '-p', f'grid_resolution_m:={frenet_resolution}',
+                '-p', f'grid_forward_m:={frenet_grid_forward}',
+                '-p', f'grid_rear_m:={frenet_grid_rear}',
+                '-p', f'grid_half_width_m:={frenet_grid_half_width}',
             ],
             output='screen',
         )

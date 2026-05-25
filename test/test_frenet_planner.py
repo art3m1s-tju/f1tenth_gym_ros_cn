@@ -13,6 +13,7 @@ from pnc_rc.frenet.planner import (
     LocalGridConfig,
     ReferencePath,
     build_occupancy_grid,
+    densify_path_points,
     estimate_heading_jumps,
     estimate_open_path_curvature,
     evaluate_quartic,
@@ -22,6 +23,7 @@ from pnc_rc.frenet.planner import (
     solve_quartic_longitudinal,
     solve_quintic_lateral,
     swept_corridor_points,
+    trim_path_to_position,
 )
 
 
@@ -373,6 +375,62 @@ def test_swept_corridor_includes_forward_footprint():
 
     assert np.isclose(np.max(corridor[:, 0]), 1.35)
     assert np.isclose(np.min(corridor[:, 0]), -0.05)
+
+
+def test_densify_path_limits_segment_spacing():
+    points = np.array([[0.0, 0.0], [0.23, 0.0]], dtype=float)
+
+    dense = densify_path_points(points, max_step_m=0.05)
+
+    segment_lengths = np.linalg.norm(np.diff(dense, axis=0), axis=1)
+    assert np.all(segment_lengths <= 0.05 + 1e-9)
+    assert np.allclose(dense[0], points[0])
+    assert np.allclose(dense[-1], points[-1])
+
+
+def test_occupancy_grid_detects_obstacle_between_sparse_path_points():
+    cfg = LocalGridConfig(
+        forward_m=4.0,
+        rear_m=1.0,
+        half_width_m=2.0,
+        resolution_m=0.02,
+        inflation_radius_m=0.03,
+        scan_offset_x_m=0.0,
+    )
+    grid = build_occupancy_grid(
+        np.array([1.0]),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=cfg,
+    )
+    sparse_path = np.array([[0.0, 0.0], [2.0, 0.0]], dtype=float)
+
+    sparse_collision, _ = grid.query_path(
+        sparse_path,
+        (0.0, 0.0, 0.0),
+        path_sample_step_m=0.0,
+    )
+    dense_collision, _ = grid.query_path(
+        sparse_path,
+        (0.0, 0.0, 0.0),
+        path_sample_step_m=0.05,
+    )
+
+    assert not sparse_collision
+    assert dense_collision
+
+
+def test_trim_path_to_position_reanchors_from_current_pose():
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=float)
+
+    trimmed = trim_path_to_position(points, np.array([1.25, 0.0]), min_remaining_length_m=0.5)
+
+    assert len(trimmed) >= 2
+    assert np.isclose(trimmed[0, 0], 1.25, atol=1e-6)
+    assert np.isclose(trimmed[0, 1], 0.0, atol=1e-6)
+    assert trimmed[1, 0] >= 1.0
 
 
 def test_occupancy_grid_corridor_detects_vehicle_width_collision():
