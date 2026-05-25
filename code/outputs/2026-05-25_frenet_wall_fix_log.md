@@ -305,3 +305,84 @@ ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
 - `No safe Frenet candidate` 日志中的 `heading_reject` 或 `curvature_reject` 是否激增。
 - `frenet_d_min` / `frenet_d_max` 是否仍不足以覆盖赛道可行宽度。
 - 静态地图膨胀半径是否过于保守，导致可行空间被人为压缩。
+
+## 2026-05-25 追加修复：动态可跟踪性与安全走廊
+
+### 回滚点
+
+在继续修改前，已把上一版 review 状态提交并推送到 GitHub：
+
+```text
+ac345dc Checkpoint Frenet wall fix review state
+origin/stage/frenet-static-obstacle-avoidance
+```
+
+这版保留了 launch override、RViz 候选轨迹显示、专用测试地图和前一轮 Frenet 修复，后续如果需要可以直接回滚到该提交。
+
+### 新发现
+
+subagent review 和 headless 复核指出，剩余“撞墙/突然失效”的主因已经不是地图未切换，而是以下工程约束没有对齐：
+
+- Frenet 原本允许 `max_curvature=1.8 1/m`，但 LQR `max_steering_angle=0.36rad` 和 `wheelbase=0.3302m` 对应车辆最大可跟踪曲率约 `1.14 1/m`。
+- 原碰撞检测只检查候选中心线，没有覆盖车身宽度和 LQR 跟踪误差。
+- 复用上一条 safe candidate 时只检查 age，没有用当前 occupancy 重新验证。
+- LQR 把 Frenet 滚动局部路径当成普通 open path，接近局部 horizon 末端时会周期性触发 endpoint stop。
+- `speed=1.00` 但 `s_dot=0.00` 的日志说明 Frenet 仍可能使用语义不明确的 odom twist，导致初始纵向速度错误。
+
+### 修改
+
+- `FrenetPlannerConfig.max_curvature` 默认改为 `1.1 1/m`，并通过 launch 参数 `frenet_max_curvature` 暴露，默认低于车辆转角极限对应的 `1.14 1/m`。
+- Frenet 预测时间从固定 `2.0s` 扩展为 `2.0s~3.0s`，launch 新增 `frenet_t_min/t_max/t_step`，让绕障候选更平滑。
+- `OccupancyGrid.query_path()` 支持沿候选轨迹生成横向 swept corridor，默认 `frenet_corridor_radius_m=0.16`，不再只检查中心点。
+- 新增 hard clearance reject：`frenet_min_clearance_m=0.05`，日志新增 `clearance_reject`。
+- 复用上一条 safe candidate 前，使用当前 occupancy 和 corridor 重新检查 collision/clearance。
+- Frenet reference 支持 `reference_closed_loop`，launch 暴露为 `frenet_reference_closed_loop`。专用 open-style 测试赛道使用 `false`。
+- Frenet node 优先用连续 odom 位姿差分估计 map-frame 速度，stamp 不可用或重复时保留最近有效差分速度，减少 body-frame twist 污染 `s_dot/d_dot`。
+- LQR 新增 `open_loop_endpoint_stop_max_path_length`。Frenet 模式下普通滚动局部路径不再触发 endpoint stop，只有很短的 emergency stop path 才会触发停车。
+- LQR 到 open-loop endpoint 时刹车但保持最近转角，不再强制把 steering 清零。
+
+### 验证
+
+容器内单元测试：
+
+```text
+17 passed in 0.21s
+```
+
+新增测试覆盖：
+
+- swept corridor 会横向展开路径；
+- corridor 能检测中心点不会撞、但车身宽度会撞的场景；
+- hard clearance reject 会拒绝 clearance 不足的候选；
+- open reference 不会在终点 wrap 到起点。
+
+headless launch 验证命令：
+
+```bash
+ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
+  enable_rviz:=false enable_frenet_planner:=true \
+  map_path:=/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/frenet_test_open_two_blocks \
+  track_csv:=/sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/frenet_test_loop_open_processed_track.csv \
+  trajectory_mode:=centerline sx:=0.0 sy:=5.0 stheta:=3.1416 \
+  frenet_reference_closed_loop:=false \
+  frenet_d_min:=-1.8 frenet_d_max:=1.8 \
+  frenet_max_heading_jump:=0.85 \
+  frenet_grid_inflation_radius_m:=0.22 \
+  frenet_max_curvature:=1.1 \
+  frenet_corridor_radius_m:=0.16 \
+  frenet_min_clearance_m:=0.05
+```
+
+结果：
+
+- `gym_bridge` 打印正确地图和起点：
+  `map=/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/frenet_test_open_two_blocks`
+  `ego_start=(0.000, 5.000, 3.142)`
+- 25 秒 headless 窗口内，Frenet 持续发布 `31` 点局部轨迹。
+- 未再出现 `No safe Frenet candidate`。
+- 普通滚动局部路径未再触发 `LQR open-loop endpoint reached; stopping`。
+
+当前结论：
+
+- 地图 override、Frenet 单元逻辑、动态可跟踪性、车身安全走廊、复用路径校验和 rolling local path 的 LQR endpoint 语义已经修到位。
+- 这不等价于所有可能地图都已经实车级验证；后续如果换回更窄/更复杂赛道，需要重新看 `clearance_reject/collision_reject/curvature_reject` 的占比。

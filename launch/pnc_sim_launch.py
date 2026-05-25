@@ -72,12 +72,21 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_target_speed', default_value='1.5'),
         DeclareLaunchArgument('frenet_v_min', default_value='0.6'),
         DeclareLaunchArgument('frenet_v_max', default_value='2.5'),
+        DeclareLaunchArgument('frenet_t_min', default_value='2.0'),
+        DeclareLaunchArgument('frenet_t_max', default_value='3.0'),
+        DeclareLaunchArgument('frenet_t_step', default_value='0.5'),
         DeclareLaunchArgument('frenet_d_min', default_value='-1.8'),
         DeclareLaunchArgument('frenet_d_max', default_value='1.8'),
+        DeclareLaunchArgument('frenet_max_curvature', default_value='1.1'),
+        DeclareLaunchArgument('frenet_safe_clearance_m', default_value='0.15'),
+        DeclareLaunchArgument('frenet_min_clearance_m', default_value='0.05'),
+        DeclareLaunchArgument('frenet_corridor_radius_m', default_value='0.16'),
         DeclareLaunchArgument('frenet_max_heading_jump', default_value='0.85'),
         DeclareLaunchArgument('frenet_min_progress_step_m', default_value='0.20'),
         DeclareLaunchArgument('frenet_reuse_last_candidate_timeout_s', default_value='1.0'),
         DeclareLaunchArgument('frenet_projection_search_window_m', default_value='6.0'),
+        DeclareLaunchArgument('frenet_stop_path_length_m', default_value='0.25'),
+        DeclareLaunchArgument('frenet_reference_closed_loop', default_value='true'),
         DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
         DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
@@ -207,13 +216,24 @@ def generate_launch_description():
         frenet_target_speed = LaunchConfiguration('frenet_target_speed').perform(context)
         frenet_v_min = LaunchConfiguration('frenet_v_min').perform(context)
         frenet_v_max = LaunchConfiguration('frenet_v_max').perform(context)
+        frenet_t_min = LaunchConfiguration('frenet_t_min').perform(context)
+        frenet_t_max = LaunchConfiguration('frenet_t_max').perform(context)
+        frenet_t_step = LaunchConfiguration('frenet_t_step').perform(context)
         frenet_d_min = LaunchConfiguration('frenet_d_min').perform(context)
         frenet_d_max = LaunchConfiguration('frenet_d_max').perform(context)
+        frenet_max_curvature = LaunchConfiguration('frenet_max_curvature').perform(context)
+        frenet_safe_clearance = LaunchConfiguration('frenet_safe_clearance_m').perform(context)
+        frenet_min_clearance = LaunchConfiguration('frenet_min_clearance_m').perform(context)
+        frenet_corridor_radius = LaunchConfiguration('frenet_corridor_radius_m').perform(context)
         frenet_max_heading_jump = LaunchConfiguration('frenet_max_heading_jump').perform(context)
         frenet_min_progress_step = LaunchConfiguration('frenet_min_progress_step_m').perform(context)
         frenet_reuse_timeout = LaunchConfiguration('frenet_reuse_last_candidate_timeout_s').perform(context)
         frenet_projection_search_window = LaunchConfiguration(
             'frenet_projection_search_window_m'
+        ).perform(context)
+        frenet_stop_path_length = LaunchConfiguration('frenet_stop_path_length_m').perform(context)
+        frenet_reference_closed_loop = LaunchConfiguration(
+            'frenet_reference_closed_loop'
         ).perform(context)
         frenet_inflation = LaunchConfiguration('frenet_grid_inflation_radius_m').perform(context)
         frenet_resolution = LaunchConfiguration('frenet_grid_resolution_m').perform(context)
@@ -251,6 +271,7 @@ def generate_launch_description():
         frenet_enabled = str(enable_frenet).lower() in ('true', '1', 'yes', 'on')
         lqr_path_topic = '/local_trajectory' if frenet_enabled else '/global_trajectory'
         lqr_path_closed_loop = 'false' if frenet_enabled else 'true'
+        lqr_endpoint_stop_max_path_length = '0.5' if frenet_enabled else '1000000000.0'
         frenet_proc = ExecuteProcess(
             cmd=[
                 'python3', os.path.join(code_dir, 'run_frenet_planner.py'),
@@ -266,12 +287,21 @@ def generate_launch_description():
                 '-p', f'target_speed:={frenet_target_speed}',
                 '-p', f'v_min:={frenet_v_min}',
                 '-p', f'v_max:={frenet_v_max}',
+                '-p', f't_min:={frenet_t_min}',
+                '-p', f't_max:={frenet_t_max}',
+                '-p', f't_step:={frenet_t_step}',
                 '-p', f'd_min:={frenet_d_min}',
                 '-p', f'd_max:={frenet_d_max}',
+                '-p', f'max_curvature:={frenet_max_curvature}',
+                '-p', f'safe_clearance_m:={frenet_safe_clearance}',
+                '-p', f'min_clearance_m:={frenet_min_clearance}',
+                '-p', f'corridor_radius_m:={frenet_corridor_radius}',
                 '-p', f'max_heading_jump:={frenet_max_heading_jump}',
                 '-p', f'min_progress_step_m:={frenet_min_progress_step}',
                 '-p', f'reuse_last_candidate_timeout_s:={frenet_reuse_timeout}',
                 '-p', f'projection_search_window_m:={frenet_projection_search_window}',
+                '-p', f'stop_path_length_m:={frenet_stop_path_length}',
+                '-p', f'reference_closed_loop:={frenet_reference_closed_loop}',
                 '-p', f'grid_inflation_radius_m:={frenet_inflation}',
                 '-p', f'grid_resolution_m:={frenet_resolution}',
             ],
@@ -289,6 +319,7 @@ def generate_launch_description():
             '-p', 'vehicle_frame:=ego_racecar/base_link',
             '-p', 'tf_lookup_timeout_sec:=0.05',
             '-p', f'path_closed_loop:={lqr_path_closed_loop}',
+            '-p', f'open_loop_endpoint_stop_max_path_length:={lqr_endpoint_stop_max_path_length}',
             '-p', 'wheelbase:=0.3302',
             '-p', f'target_speed:={target_speed}',
             '-p', f'min_speed:={min_speed}',

@@ -7,6 +7,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
 from pnc_rc.frenet.planner import (
+    FrenetPlanStats,
     FrenetPlannerConfig,
     FrenetState,
     LocalGridConfig,
@@ -20,6 +21,7 @@ from pnc_rc.frenet.planner import (
     plan_frenet_path,
     solve_quartic_longitudinal,
     solve_quintic_lateral,
+    swept_corridor_points,
 )
 
 
@@ -346,3 +348,102 @@ def test_planner_accepts_curved_reference_from_stationary_start():
 
     assert candidate is not None
     assert candidate.max_curvature <= config.max_curvature
+
+
+def test_swept_corridor_expands_path_laterally():
+    points = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+
+    corridor = swept_corridor_points(points, corridor_radius_m=0.2, corridor_sample_step_m=0.1)
+
+    assert len(corridor) > len(points)
+    assert np.isclose(np.max(corridor[:, 1]), 0.2)
+    assert np.isclose(np.min(corridor[:, 1]), -0.2)
+
+
+def test_occupancy_grid_corridor_detects_vehicle_width_collision():
+    cfg = LocalGridConfig(
+        forward_m=4.0,
+        rear_m=1.0,
+        half_width_m=2.0,
+        resolution_m=0.05,
+        inflation_radius_m=0.05,
+        scan_offset_x_m=0.0,
+    )
+    obstacle_range = math.hypot(1.0, 0.2)
+    obstacle_angle = math.atan2(0.2, 1.0)
+    grid = build_occupancy_grid(
+        np.array([obstacle_range]),
+        angle_min=obstacle_angle,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=cfg,
+    )
+    centerline = np.array([[1.0, 0.0]], dtype=float)
+
+    center_collision, _ = grid.query_path(centerline, (0.0, 0.0, 0.0))
+    corridor_collision, _ = grid.query_path(
+        centerline,
+        (0.0, 0.0, 0.0),
+        corridor_radius_m=0.25,
+        corridor_sample_step_m=0.05,
+    )
+
+    assert not center_collision
+    assert corridor_collision
+
+
+def test_planner_hard_rejects_low_clearance_candidate():
+    points = np.column_stack([np.linspace(0.0, 20.0, 80), np.zeros(80)])
+    points = np.vstack([points, [[20.0, 8.0], [0.0, 8.0]]])
+    reference = ReferencePath.from_points(points)
+    state = FrenetState(s=0.0, d=0.0, s_dot=0.8, d_dot=0.0, s_ddot=0.0, d_ddot=0.0)
+    cfg = LocalGridConfig(
+        forward_m=4.0,
+        rear_m=1.0,
+        half_width_m=2.0,
+        resolution_m=0.02,
+        inflation_radius_m=0.05,
+        scan_offset_x_m=0.0,
+    )
+    obstacle_range = math.hypot(0.8, 0.18)
+    obstacle_angle = math.atan2(0.18, 0.8)
+    grid = build_occupancy_grid(
+        np.array([obstacle_range]),
+        angle_min=obstacle_angle,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=cfg,
+    )
+    config = FrenetPlannerConfig(
+        d_min=0.0,
+        d_max=0.0,
+        d_step=1.0,
+        t_min=1.0,
+        t_max=1.0,
+        t_step=1.0,
+        v_min=0.8,
+        v_max=0.8,
+        v_step=1.0,
+        target_speed=0.8,
+        corridor_radius_m=0.1,
+        corridor_sample_step_m=0.05,
+        min_clearance_m=0.04,
+    )
+    stats = FrenetPlanStats()
+
+    candidate = plan_frenet_path(reference, state, grid, (0.0, 0.0, 0.0), config, stats)
+
+    assert candidate is None
+    assert stats.clearance_rejections > 0
+
+
+def test_reference_path_open_mode_does_not_wrap_at_endpoint():
+    points = np.array([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], dtype=float)
+    reference = ReferencePath.from_points(points, closed_loop=False)
+
+    endpoint, _, _ = reference.sample(100.0, 0.0)
+
+    assert np.allclose(endpoint, [20.0, 0.0])
+    assert not reference.closed_loop

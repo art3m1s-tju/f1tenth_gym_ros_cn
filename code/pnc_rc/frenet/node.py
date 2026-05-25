@@ -55,12 +55,17 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("d_max", 1.0)
         self.declare_parameter("d_step", 0.1)
         self.declare_parameter("t_min", 2.0)
-        self.declare_parameter("t_max", 2.0)
-        self.declare_parameter("t_step", 0.2)
+        self.declare_parameter("t_max", 3.0)
+        self.declare_parameter("t_step", 0.5)
         self.declare_parameter("v_min", 0.6)
         self.declare_parameter("v_max", 2.5)
         self.declare_parameter("v_step", 0.3)
         self.declare_parameter("trajectory_dt", 0.1)
+        self.declare_parameter("max_curvature", 1.1)
+        self.declare_parameter("safe_clearance_m", 0.15)
+        self.declare_parameter("min_clearance_m", 0.05)
+        self.declare_parameter("corridor_radius_m", 0.16)
+        self.declare_parameter("corridor_sample_step_m", 0.10)
         self.declare_parameter("max_heading_jump", 0.65)
         self.declare_parameter("min_progress_step_m", 0.20)
         self.declare_parameter("grid_forward_m", 7.0)
@@ -73,6 +78,8 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("debug_max_safe_candidates", 12)
         self.declare_parameter("reuse_last_candidate_timeout_s", 1.0)
         self.declare_parameter("projection_search_window_m", 6.0)
+        self.declare_parameter("stop_path_length_m", 0.25)
+        self.declare_parameter("reference_closed_loop", True)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
         self.planner_config = FrenetPlannerConfig(
@@ -87,6 +94,13 @@ class FrenetStaticObstaclePlanner(Node):
             v_step=float(self.get_parameter("v_step").value),
             trajectory_dt=float(self.get_parameter("trajectory_dt").value),
             target_speed=float(self.get_parameter("target_speed").value),
+            max_curvature=float(self.get_parameter("max_curvature").value),
+            safe_clearance=float(self.get_parameter("safe_clearance_m").value),
+            min_clearance_m=float(self.get_parameter("min_clearance_m").value),
+            corridor_radius_m=float(self.get_parameter("corridor_radius_m").value),
+            corridor_sample_step_m=float(
+                self.get_parameter("corridor_sample_step_m").value
+            ),
             max_heading_jump=float(self.get_parameter("max_heading_jump").value),
             min_progress_step_m=float(self.get_parameter("min_progress_step_m").value),
         )
@@ -160,12 +174,21 @@ class FrenetStaticObstaclePlanner(Node):
             0.5,
             float(self.get_parameter("projection_search_window_m").value),
         )
+        self.stop_path_length_m = max(
+            0.05,
+            float(self.get_parameter("stop_path_length_m").value),
+        )
         publish_rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
         self.timer = self.create_timer(1.0 / publish_rate, self.plan_once)
         self.last_safe_candidate_xy: np.ndarray | None = None
         self.last_safe_candidate_time: float | None = None
         self.last_reuse_log_time = 0.0
         self.previous_s: float | None = None
+        self.reference_closed_loop = bool(self.get_parameter("reference_closed_loop").value)
+        self.previous_odom_position: np.ndarray | None = None
+        self.previous_odom_time: float | None = None
+        self.previous_odom_wall_time: float | None = None
+        self.previous_velocity_xy = np.zeros(2, dtype=float)
         self.get_logger().info(
             "Frenet static obstacle planner started "
             f"(local_path={self.path_pub.topic_name}, "
@@ -181,7 +204,10 @@ class FrenetStaticObstaclePlanner(Node):
         if len(points) < 3:
             self.get_logger().warning("Ignoring global path with fewer than 3 points.")
             return
-        self.reference = ReferencePath.from_points(points)
+        self.reference = ReferencePath.from_points(
+            points,
+            closed_loop=self.reference_closed_loop,
+        )
         self.frame_id = msg.header.frame_id or self.frame_id
 
     def odom_callback(self, msg: Odometry) -> None:
@@ -260,7 +286,7 @@ class FrenetStaticObstaclePlanner(Node):
             debug_candidates=debug_candidates,
         )
         if candidate is None:
-            if self._reuse_last_candidate_if_fresh(stamp, now):
+            if self._reuse_last_candidate_if_fresh(stamp, now, occupancy, vehicle_pose):
                 self.publish_debug_markers(stamp, [], None)
                 return
             self.log_no_candidate(
@@ -304,6 +330,7 @@ class FrenetStaticObstaclePlanner(Node):
             f"progress_reject={stats.progress_rejections}, "
             f"heading_reject={stats.heading_rejections}, "
             f"curvature_reject={stats.curvature_rejections}, "
+            f"clearance_reject={stats.clearance_rejections}, "
             f"collision_reject={stats.collision_rejections}, "
             f"best_clearance={stats.best_clearance_m:.2f}m, "
             f"occupied_cells={occupied_cells}, static_map_ready={static_map_ready}, "
@@ -314,7 +341,10 @@ class FrenetStaticObstaclePlanner(Node):
 
     def publish_stop_path(self, stamp, position: np.ndarray, yaw: float) -> None:
         forward = np.array([math.cos(yaw), math.sin(yaw)], dtype=float)
-        offsets = np.array([0.0, 0.05, 0.10], dtype=float)
+        offsets = np.array(
+            [0.0, 0.5 * self.stop_path_length_m, self.stop_path_length_m],
+            dtype=float,
+        )
         points = position.reshape(1, 2) + offsets.reshape(-1, 1) * forward.reshape(1, 2)
         self.publish_path(stamp, points)
 
@@ -353,17 +383,38 @@ class FrenetStaticObstaclePlanner(Node):
 
         self.debug_marker_pub.publish(marker_array)
 
-    def _reuse_last_candidate_if_fresh(self, stamp, now: float) -> bool:
+    def _reuse_last_candidate_if_fresh(
+        self,
+        stamp,
+        now: float,
+        occupancy,
+        vehicle_pose: tuple[float, float, float],
+    ) -> bool:
         if self.last_safe_candidate_xy is None or self.last_safe_candidate_time is None:
             return False
         age = now - self.last_safe_candidate_time
         if age > self.reuse_last_candidate_timeout_s:
             return False
+        collision, min_clearance = occupancy.query_path(
+            self.last_safe_candidate_xy,
+            vehicle_pose,
+            self.planner_config.corridor_radius_m,
+            self.planner_config.corridor_sample_step_m,
+        )
+        if collision or min_clearance < self.planner_config.min_clearance_m:
+            if now - self.last_reuse_log_time >= 0.5:
+                self.last_reuse_log_time = now
+                self.get_logger().warning(
+                    "Discarding stale Frenet candidate because it is no longer safe "
+                    f"(age={age:.2f}s, collision={collision}, "
+                    f"clearance={min_clearance:.2f}m)."
+                )
+            return False
         if now - self.last_reuse_log_time >= 0.5:
             self.last_reuse_log_time = now
             self.get_logger().warning(
                 "No safe Frenet candidate in current cycle; reusing last safe path "
-                f"(age={age:.2f}s)."
+                f"(age={age:.2f}s, clearance={min_clearance:.2f}m)."
             )
         self.publish_path(stamp, self.last_safe_candidate_xy)
         return True
@@ -422,7 +473,24 @@ class FrenetStaticObstaclePlanner(Node):
             pose.orientation.w,
         )
         position = np.array([pose.position.x, pose.position.y], dtype=float)
-        velocity_xy = np.array([twist.linear.x, twist.linear.y], dtype=float)
+        velocity_xy = self.previous_velocity_xy.copy()
+        stamp_sec = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        wall_time = time.monotonic()
+        if self.previous_odom_position is not None and self.previous_odom_time is not None:
+            dt = stamp_sec - self.previous_odom_time
+            if 1e-4 <= dt <= 0.5:
+                velocity_xy = (position - self.previous_odom_position) / dt
+            elif self.previous_odom_wall_time is not None:
+                wall_dt = wall_time - self.previous_odom_wall_time
+                displacement = position - self.previous_odom_position
+                if 1e-4 <= wall_dt <= 0.5 and np.linalg.norm(displacement) > 1e-5:
+                    velocity_xy = displacement / wall_dt
+        elif not np.any(velocity_xy):
+            velocity_xy = np.array([twist.linear.x, twist.linear.y], dtype=float)
+        self.previous_velocity_xy = velocity_xy.copy()
+        self.previous_odom_position = position.copy()
+        self.previous_odom_time = stamp_sec
+        self.previous_odom_wall_time = wall_time
         return position, yaw, velocity_xy
 
 

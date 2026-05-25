@@ -121,6 +121,7 @@ class LqrController(Node):
         self.declare_parameter("tf_lookup_timeout_sec", 0.02)
         self.declare_parameter("path_closed_loop", True)
         self.declare_parameter("open_loop_finish_distance", 0.25)
+        self.declare_parameter("open_loop_endpoint_stop_max_path_length", 1.0e9)
 
         # ---- 车辆模型参数 ----
         self.declare_parameter("wheelbase", 0.3302)
@@ -175,6 +176,10 @@ class LqrController(Node):
         self.open_loop_finish_distance = max(
             1e-3,
             float(self.get_parameter("open_loop_finish_distance").value),
+        )
+        self.open_loop_endpoint_stop_max_path_length = max(
+            0.0,
+            float(self.get_parameter("open_loop_endpoint_stop_max_path_length").value),
         )
 
         self.wheelbase = max(1e-6, float(self.get_parameter("wheelbase").value))
@@ -862,10 +867,9 @@ class LqrController(Node):
             if not self.open_loop_finished:
                 self.get_logger().info("LQR open-loop endpoint reached; stopping.")
             self.open_loop_finished = True
-            delta_cmd = 0.0
+            delta_cmd = self.previous_delta_cmd
             v_cmd = 0.0
             self.current_speed_cmd = 0.0
-            self.previous_delta_cmd = 0.0
 
         self._publish_drive(stamp, delta_cmd, v_cmd)
         self._append_tracked_pose(position, yaw, stamp)
@@ -896,7 +900,10 @@ class LqrController(Node):
 
     def _open_loop_finished(self, position: np.ndarray) -> bool:
         """判断开环路径是否已到达终点。"""
-        if self.path_closed_loop or self.points is None:
+        if self.path_closed_loop or self.points is None or self.segment_lengths is None:
+            return False
+        path_length = float(np.sum(self.segment_lengths))
+        if path_length > self.open_loop_endpoint_stop_max_path_length:
             return False
         endpoint = self.points[-1]
         return float(np.linalg.norm(position - endpoint)) <= self.open_loop_finish_distance

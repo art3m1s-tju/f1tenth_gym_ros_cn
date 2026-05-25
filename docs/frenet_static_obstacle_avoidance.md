@@ -108,10 +108,18 @@ python3 code/run_frenet_planner.py
 | `frenet_target_speed` | `1.5` | Frenet 代价函数使用的目标终点速度，独立于 LQR 巡航速度 |
 | `frenet_v_min` | `0.6` | Frenet 纵向终点速度采样下界 |
 | `frenet_v_max` | `2.5` | Frenet 纵向终点速度采样上界 |
+| `frenet_t_min` | `2.0` | Frenet 候选轨迹预测时间下界 |
+| `frenet_t_max` | `3.0` | Frenet 候选轨迹预测时间上界；更长时间让绕障更平滑 |
+| `frenet_t_step` | `0.5` | Frenet 候选轨迹预测时间采样步长 |
+| `frenet_max_curvature` | `1.1` | 候选轨迹最大曲率，默认低于 `max_steering_angle=0.36rad` 对应的车辆极限约 `1.14 1/m` |
+| `frenet_corridor_radius_m` | `0.16` | 沿候选轨迹横向展开的车身/跟踪误差走廊半径，不再只检查中心点 |
+| `frenet_safe_clearance_m` | `0.15` | clearance 代价的软安全距离 |
+| `frenet_min_clearance_m` | `0.05` | 候选轨迹 hard reject 的最小 clearance |
 | `frenet_max_heading_jump` | `0.85` | 单条候选轨迹相邻段允许的最大航向跳变（rad） |
 | `frenet_min_progress_step_m` | `0.20` | 单条候选轨迹从起点到终点的最小总前向推进距离 |
 | `frenet_reuse_last_candidate_timeout_s` | `1.0` | 当前周期无解时，允许继续复用最近一条安全局部轨迹的最长时长 |
 | `frenet_projection_search_window_m` | `6.0` | Frenet 在闭环参考线中围绕上一帧 `s` 保持投影连续性的弧长搜索窗口 |
+| `frenet_reference_closed_loop` | `true` | Frenet 参考线是否按闭环投影；专用 open-style 测试赛道建议设为 `false` |
 | `frenet_grid_inflation_radius_m` | `0.28` | 障碍膨胀半径 |
 | `frenet_grid_resolution_m` | `0.05` | 局部栅格分辨率 |
 
@@ -238,11 +246,13 @@ sx:=0.0 sy:=5.0 stheta:=3.1416
 - baseline：全局轨迹仍穿过障碍物，车辆应更容易撞到方块。
 - Frenet：`/local_trajectory` 会绕开膨胀栅格中的方块，LQR 跟踪局部轨迹。
 
-Frenet 默认预测时间固定为 `2.0s`，局部轨迹通常是 21 个点，避免 LQR 频繁跟踪过短轨迹。
+Frenet 默认预测时间为 `2.0s~3.0s`，局部轨迹通常是 21 到 31 个点。更长的预测时间降低绕障曲率，避免规划器发布 LQR 物理上跟不住的急转轨迹。
 
 `frenet_target_speed` / `frenet_v_min` / `frenet_v_max` 不再和 LQR 的 `target_speed` 绑死。这样即使控制器当前巡航速度设置得偏低，Frenet 也仍然可以用更合理的前向采样范围生成空间上足够平滑的候选轨迹。
 
-`frenet_projection_search_window_m` 用于避免回环赛道上的投影串支路。对存在平行直道的闭环赛道，这个参数非常重要；如果只按欧式最近点投影，Frenet 可能会突然跳到另一条支路，导致横向偏移 `d` 瞬间变成不合理的大值。
+`frenet_projection_search_window_m` 用于避免回环赛道上的投影串支路。对存在平行直道的闭环赛道，这个参数非常重要；如果只按欧式最近点投影，Frenet 可能会突然跳到另一条支路，导致横向偏移 `d` 瞬间变成不合理的大值。对专用 open-style 测试赛道，可以设置 `frenet_reference_closed_loop:=false`，避免首尾 seam 参与投影。
+
+Frenet 现在按局部轨迹 corridor 做碰撞检测，而不是只检查中心点。`frenet_corridor_radius_m` 近似覆盖车身半宽和 LQR 跟踪误差；`frenet_min_clearance_m` 是 hard reject 阈值，低于该 clearance 的候选会直接丢弃。
 
 如果终端出现：
 
@@ -250,7 +260,7 @@ Frenet 默认预测时间固定为 `2.0s`，局部轨迹通常是 21 个点，�
 No safe Frenet candidate; publishing stop path
 ```
 
-说明当前局部栅格里所有候选轨迹都被碰撞检测剔除了。括号里的 `total`、`safe`、`collision_reject`、`best_clearance` 和 `occupied_cells` 用来判断是障碍膨胀太保守、横向采样范围不够，还是地图边界已经把可行空间堵住。第一步可以尝试：
+说明当前局部栅格里所有候选轨迹都被剔除了。括号里的 `total`、`safe`、`heading_reject`、`curvature_reject`、`clearance_reject`、`collision_reject`、`best_clearance` 和 `occupied_cells` 用来判断是轨迹不够平滑、曲率超过车辆极限、安全走廊太保守，还是地图边界已经把可行空间堵住。第一步可以尝试：
 
 ```bash
 frenet_grid_inflation_radius_m:=0.22 frenet_d_min:=-1.8 frenet_d_max:=1.8
@@ -258,7 +268,7 @@ frenet_grid_inflation_radius_m:=0.22 frenet_d_min:=-1.8 frenet_d_max:=1.8
 
 如果 `occupied_cells` 明显偏高，但 RViz 里又看不到对应障碍，下一步优先检查 `/scan` 是否包含大量 `0.0` range。现在规划器会过滤这些零值回波；如果你本地分支里还没带这个修复，日志上通常会表现为 `collision_reject` 快速打满、`best_clearance` 接近 `0.0m`。
 
-如果日志偶尔出现当前周期 `No safe Frenet candidate`，但前后几个周期又能恢复 21 点局部轨迹，规划器现在会优先短时复用上一条安全 Frenet 轨迹，而不是立刻退回 3 点停车路径。这个机制主要用于吸收瞬时 scan 抖动或局部几何判定抖动，不替代真正的候选生成修复。
+如果日志偶尔出现当前周期 `No safe Frenet candidate`，但前后几个周期又能恢复局部轨迹，规划器现在会优先短时复用上一条安全 Frenet 轨迹。复用前会用当前 occupancy/corridor 重新校验上一条路径，不再只按时间新鲜度盲目复用。
 
 ## 调试建议
 
@@ -286,14 +296,32 @@ frenet_grid_inflation_radius_m:=0.22 frenet_d_min:=-1.8 frenet_d_max:=1.8
 - 最佳候选是否会突然贴外墙。
 - `No safe Frenet candidate` 是否真的是环境无解，而不是感知栅格构建错误。
 
+推荐 headless 验证命令：
+
+```bash
+ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
+  enable_rviz:=false enable_frenet_planner:=true \
+  map_path:=/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/frenet_test_open_two_blocks \
+  track_csv:=/sim_ws/src/f1tenth_gym_ros/code/outputs/generated_tracks/frenet_test_loop_open_processed_track.csv \
+  trajectory_mode:=centerline \
+  sx:=0.0 sy:=5.0 stheta:=3.1416 \
+  frenet_reference_closed_loop:=false \
+  frenet_d_min:=-1.8 frenet_d_max:=1.8 \
+  frenet_max_heading_jump:=0.85 \
+  frenet_grid_inflation_radius_m:=0.22 \
+  frenet_max_curvature:=1.1 \
+  frenet_corridor_radius_m:=0.16 \
+  frenet_min_clearance_m:=0.05
+```
+
 ## 验证记录
 
 | 场景 | 预期结果 | 当前结果 |
 |---|---|---|
-| 无障碍 | `/local_trajectory` 接近 `/global_trajectory` | 待跑 |
-| 中心静态障碍 | 局部轨迹绕开障碍 | 待跑 |
-| 关闭 Frenet | 保持 `main` 的 LQR 行为 | 待跑 |
-| 开启 Frenet | LQR 跟踪 `/local_trajectory` | 待跑 |
+| 单元测试 | Frenet 几何、scan 过滤、投影连续性、corridor collision 均通过 | 容器内 `17 passed` |
+| 专用地图启动 | bridge 加载 `frenet_test_open_two_blocks`，起点 `(0, 5, pi)` | 已验证 |
+| 中心静态障碍 | 局部轨迹绕开障碍，25s headless 内不持续 stop path | 已验证，无 `No safe Frenet candidate` |
+| 开启 Frenet | LQR 跟踪 `/local_trajectory`，普通滚动局部路径不触发 endpoint 停车 | 已验证 |
 
 ## 本次实现文件
 

@@ -32,15 +32,18 @@ class FrenetPlannerConfig:
     d_max: float = 1.0
     d_step: float = 0.1
     t_min: float = 2.0
-    t_max: float = 2.0
-    t_step: float = 0.2
+    t_max: float = 3.0
+    t_step: float = 0.5
     v_min: float = 0.6
     v_max: float = 2.5
     v_step: float = 0.3
     trajectory_dt: float = 0.1
     target_speed: float = 1.5
-    max_curvature: float = 1.8
-    safe_clearance: float = 0.18
+    max_curvature: float = 1.1
+    safe_clearance: float = 0.15
+    min_clearance_m: float = 0.05
+    corridor_radius_m: float = 0.16
+    corridor_sample_step_m: float = 0.10
     weight_lateral_jerk: float = 0.15
     weight_longitudinal_jerk: float = 0.08
     weight_time: float = 0.15
@@ -73,24 +76,31 @@ class ReferencePath:
     cumulative_s: np.ndarray
     kdtree: KDTree
     total_length: float
+    closed_loop: bool = True
 
     @classmethod
-    def from_points(cls, points: np.ndarray) -> "ReferencePath":
+    def from_points(cls, points: np.ndarray, closed_loop: bool = True) -> "ReferencePath":
         if len(points) < 3:
             raise ValueError("reference path needs at least 3 points")
         points = np.asarray(points, dtype=float)
-        closed = np.vstack([points, points[:1]])
-        segment_lengths = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+        if closed_loop:
+            path_for_segments = np.vstack([points, points[:1]])
+        else:
+            path_for_segments = points
+        segment_lengths = np.linalg.norm(np.diff(path_for_segments, axis=0), axis=1)
         total_length = float(np.sum(segment_lengths))
-        cumulative_s = np.concatenate([[0.0], np.cumsum(segment_lengths[:-1])])
+        cumulative_s = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+        if closed_loop:
+            cumulative_s = cumulative_s[:-1]
         return cls(
             points=points,
-            headings=compute_path_headings(points, closed_loop=True),
-            curvatures=compute_path_curvatures(points, closed_loop=True),
+            headings=compute_path_headings(points, closed_loop=closed_loop),
+            curvatures=compute_path_curvatures(points, closed_loop=closed_loop),
             segment_lengths=segment_lengths,
             cumulative_s=cumulative_s,
             kdtree=KDTree(points),
             total_length=total_length,
+            closed_loop=closed_loop,
         )
 
     def project(self, position: np.ndarray) -> tuple[float, float, float, float]:
@@ -100,7 +110,7 @@ class ReferencePath:
             self.kdtree,
             self.headings,
             self.curvatures,
-            closed_loop=True,
+            closed_loop=self.closed_loop,
         )
         return self._projection_to_frenet(projection)
 
@@ -112,7 +122,11 @@ class ReferencePath:
     ) -> tuple[float, float, float, float]:
         if search_window_m <= 0.0:
             return self.project(position)
-        wrapped_hint = float(s_hint % self.total_length)
+        wrapped_hint = (
+            float(s_hint % self.total_length)
+            if self.closed_loop
+            else float(np.clip(s_hint, 0.0, self.total_length))
+        )
         candidate_segments = self._candidate_segments_near_s(
             wrapped_hint,
             search_window_m,
@@ -123,15 +137,23 @@ class ReferencePath:
         return self._projection_to_frenet(projection)
 
     def sample(self, s: float, d: float) -> tuple[np.ndarray, float, float]:
-        s = float(s % self.total_length)
+        if self.closed_loop:
+            s = float(s % self.total_length)
+        else:
+            s = float(np.clip(s, 0.0, self.total_length))
         segment_idx = int(np.searchsorted(self.cumulative_s, s, side="right") - 1)
-        segment_idx = int(np.clip(segment_idx, 0, len(self.points) - 1))
+        max_segment_idx = len(self.points) - 1 if self.closed_loop else len(self.points) - 2
+        segment_idx = int(np.clip(segment_idx, 0, max_segment_idx))
         segment_length = float(self.segment_lengths[segment_idx])
         if segment_length <= 1e-9:
             t = 0.0
         else:
             t = float((s - self.cumulative_s[segment_idx]) / segment_length)
-        next_idx = (segment_idx + 1) % len(self.points)
+        next_idx = (
+            (segment_idx + 1) % len(self.points)
+            if self.closed_loop
+            else min(segment_idx + 1, len(self.points) - 1)
+        )
         point = (
             self.points[segment_idx]
             + t * (self.points[next_idx] - self.points[segment_idx])
@@ -164,15 +186,17 @@ class ReferencePath:
         s_hint: float,
         search_window_m: float,
     ) -> list[int]:
-        segment_mid_s = (
-            self.cumulative_s + 0.5 * self.segment_lengths[: len(self.points)]
-        ) % self.total_length
-        arc_distance = np.abs(
-            ((segment_mid_s - s_hint + 0.5 * self.total_length) % self.total_length)
-            - 0.5 * self.total_length
-        )
+        segment_mid_s = self.cumulative_s[: len(self.segment_lengths)] + 0.5 * self.segment_lengths
+        if self.closed_loop:
+            segment_mid_s = segment_mid_s % self.total_length
+            arc_distance = np.abs(
+                ((segment_mid_s - s_hint + 0.5 * self.total_length) % self.total_length)
+                - 0.5 * self.total_length
+            )
+        else:
+            arc_distance = np.abs(segment_mid_s - s_hint)
         candidate_segments = np.flatnonzero(
-            arc_distance <= (search_window_m + 0.5 * self.segment_lengths[: len(self.points)])
+            arc_distance <= (search_window_m + 0.5 * self.segment_lengths)
         )
         return [int(segment_idx) for segment_idx in candidate_segments]
 
@@ -190,7 +214,12 @@ class ReferencePath:
 
         for seg_idx in candidate_segments:
             start = self.points[seg_idx]
-            end = self.points[(seg_idx + 1) % len(self.points)]
+            next_idx = (
+                (seg_idx + 1) % len(self.points)
+                if self.closed_loop
+                else min(seg_idx + 1, len(self.points) - 1)
+            )
+            end = self.points[next_idx]
             segment = end - start
             segment_length_sq = float(segment @ segment)
             if segment_length_sq <= 1e-12:
@@ -206,7 +235,6 @@ class ReferencePath:
             best_point = projected
             best_seg_idx = seg_idx
             best_t = t
-            next_idx = (seg_idx + 1) % len(self.points)
             best_heading = interpolate_angle(
                 float(self.headings[seg_idx]),
                 float(self.headings[next_idx]),
@@ -219,7 +247,15 @@ class ReferencePath:
 
         normal = np.array([-math.sin(best_heading), math.cos(best_heading)])
         lateral_error = float((position - best_point) @ normal)
-        closest_idx = best_seg_idx if best_t < 0.5 else (best_seg_idx + 1) % len(self.points)
+        closest_idx = (
+            best_seg_idx
+            if best_t < 0.5
+            else (
+                (best_seg_idx + 1) % len(self.points)
+                if self.closed_loop
+                else min(best_seg_idx + 1, len(self.points) - 1)
+            )
+        )
         return PathProjection(
             point=best_point,
             heading=best_heading,
@@ -245,10 +281,17 @@ class OccupancyGrid:
         self,
         xy_points: np.ndarray,
         vehicle_pose: tuple[float, float, float],
+        corridor_radius_m: float = 0.0,
+        corridor_sample_step_m: float = 0.10,
     ) -> tuple[bool, float]:
         if len(xy_points) == 0:
             return False, float("inf")
-        local_xy = world_to_vehicle(xy_points, vehicle_pose)
+        query_points = swept_corridor_points(
+            xy_points,
+            corridor_radius_m,
+            corridor_sample_step_m,
+        )
+        local_xy = world_to_vehicle(query_points, vehicle_pose)
         rows, cols, inside = self.local_points_to_indices(local_xy)
         if not np.any(inside):
             return False, float("inf")
@@ -284,6 +327,7 @@ class FrenetPlanStats:
     progress_rejections: int = 0
     heading_rejections: int = 0
     curvature_rejections: int = 0
+    clearance_rejections: int = 0
     safe_candidates: int = 0
     best_clearance_m: float = 0.0
 
@@ -472,12 +516,21 @@ def plan_frenet_path(
                     if stats is not None:
                         stats.heading_rejections += 1
                     continue
-                collision, min_clearance = occupancy.query_path(xy, vehicle_pose)
+                collision, min_clearance = occupancy.query_path(
+                    xy,
+                    vehicle_pose,
+                    config.corridor_radius_m,
+                    config.corridor_sample_step_m,
+                )
                 if stats is not None:
                     stats.best_clearance_m = max(stats.best_clearance_m, min_clearance)
                 if collision:
                     if stats is not None:
                         stats.collision_rejections += 1
+                    continue
+                if min_clearance < config.min_clearance_m:
+                    if stats is not None:
+                        stats.clearance_rejections += 1
                     continue
                 scored_candidate = score_candidate(
                     xy,
@@ -662,6 +715,46 @@ def estimate_heading_jumps(points: np.ndarray) -> np.ndarray:
         [wrap_angle(float(curr - prev)) for prev, curr in zip(headings[:-1], headings[1:])],
         dtype=float,
     )
+
+
+def swept_corridor_points(
+    points: np.ndarray,
+    corridor_radius_m: float,
+    corridor_sample_step_m: float,
+) -> np.ndarray:
+    points = np.asarray(points, dtype=float)
+    if len(points) == 0:
+        return points.reshape(0, 2)
+    radius = max(0.0, float(corridor_radius_m))
+    if radius <= 1e-9:
+        return points
+    step = max(1e-3, float(corridor_sample_step_m))
+    offsets = np.arange(-radius, radius + 0.5 * step, step, dtype=float)
+    if offsets[-1] < radius:
+        offsets = np.append(offsets, radius)
+    if not np.any(np.isclose(offsets, 0.0)):
+        offsets = np.sort(np.append(offsets, 0.0))
+
+    headings = estimate_path_headings(points)
+    normals = np.column_stack([-np.sin(headings), np.cos(headings)])
+    expanded = points[:, None, :] + offsets[None, :, None] * normals[:, None, :]
+    return expanded.reshape(-1, 2)
+
+
+def estimate_path_headings(points: np.ndarray) -> np.ndarray:
+    points = np.asarray(points, dtype=float)
+    if len(points) < 2:
+        return np.zeros(len(points), dtype=float)
+    headings = np.zeros(len(points), dtype=float)
+    for idx in range(len(points)):
+        prev_point = points[max(0, idx - 1)]
+        next_point = points[min(len(points) - 1, idx + 1)]
+        delta = next_point - prev_point
+        if float(delta @ delta) <= 1e-12:
+            headings[idx] = headings[idx - 1] if idx > 0 else 0.0
+        else:
+            headings[idx] = math.atan2(float(delta[1]), float(delta[0]))
+    return headings
 
 
 def _has_valid_progress_profile(
