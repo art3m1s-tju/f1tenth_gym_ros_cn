@@ -333,7 +333,8 @@ subagent review 和 headless 复核指出，剩余“撞墙/突然失效”的�
 
 - `FrenetPlannerConfig.max_curvature` 默认改为 `1.1 1/m`，并通过 launch 参数 `frenet_max_curvature` 暴露，默认低于车辆转角极限对应的 `1.14 1/m`。
 - Frenet 预测时间从固定 `2.0s` 扩展为 `2.0s~3.0s`，launch 新增 `frenet_t_min/t_max/t_step`，让绕障候选更平滑。
-- `OccupancyGrid.query_path()` 支持沿候选轨迹生成横向 swept corridor，默认 `frenet_corridor_radius_m=0.16`，不再只检查中心点。
+- `OccupancyGrid.query_path()` 支持沿候选轨迹生成 footprint swept corridor，不再只检查 `base_link` 中心点。
+- `frenet_corridor_radius_m` 调整为 `0.14`，并新增 `frenet_footprint_front_m=0.38` / `frenet_footprint_rear_m=0.05`，覆盖车体从 `base_link` 向车头的前向长度。
 - 新增 hard clearance reject：`frenet_min_clearance_m=0.05`，日志新增 `clearance_reject`。
 - 复用上一条 safe candidate 前，使用当前 occupancy 和 corridor 重新检查 collision/clearance。
 - Frenet reference 支持 `reference_closed_loop`，launch 暴露为 `frenet_reference_closed_loop`。专用 open-style 测试赛道使用 `false`。
@@ -351,7 +352,7 @@ subagent review 和 headless 复核指出，剩余“撞墙/突然失效”的�
 
 新增测试覆盖：
 
-- swept corridor 会横向展开路径；
+- swept corridor 会同时展开横向车宽和前向 footprint；
 - corridor 能检测中心点不会撞、但车身宽度会撞的场景；
 - hard clearance reject 会拒绝 clearance 不足的候选；
 - open reference 不会在终点 wrap 到起点。
@@ -369,7 +370,10 @@ ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
   frenet_max_heading_jump:=0.85 \
   frenet_grid_inflation_radius_m:=0.22 \
   frenet_max_curvature:=1.1 \
-  frenet_corridor_radius_m:=0.16 \
+  frenet_corridor_radius_m:=0.14 \
+  frenet_footprint_front_m:=0.38 \
+  frenet_footprint_rear_m:=0.05 \
+  frenet_safe_clearance_m:=0.35 \
   frenet_min_clearance_m:=0.05
 ```
 
@@ -378,9 +382,10 @@ ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
 - `gym_bridge` 打印正确地图和起点：
   `map=/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/frenet_test_open_two_blocks`
   `ego_start=(0.000, 5.000, 3.142)`
-- 25 秒 headless 窗口内，Frenet 持续发布 `31` 点局部轨迹。
+- 25 秒 headless 窗口内，Frenet 持续发布局部轨迹。
 - 未再出现 `No safe Frenet candidate`。
 - 普通滚动局部路径未再触发 `LQR open-loop endpoint reached; stopping`。
+- 针对用户反馈“第一个障碍物擦撞”，追加 footprint corridor 后复核 tracking log：在第一障碍物 x 范围内，车辆中心 `y=6.29~6.42`，障碍物中心 `y=4.91`，不再是之前 `y≈5.14` 的擦边绕行。
 
 当前结论：
 

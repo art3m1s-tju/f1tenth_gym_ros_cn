@@ -40,16 +40,18 @@ class FrenetPlannerConfig:
     trajectory_dt: float = 0.1
     target_speed: float = 1.5
     max_curvature: float = 1.1
-    safe_clearance: float = 0.15
+    safe_clearance: float = 0.35
     min_clearance_m: float = 0.05
-    corridor_radius_m: float = 0.16
+    corridor_radius_m: float = 0.14
     corridor_sample_step_m: float = 0.10
+    footprint_front_m: float = 0.38
+    footprint_rear_m: float = 0.05
     weight_lateral_jerk: float = 0.15
     weight_longitudinal_jerk: float = 0.08
     weight_time: float = 0.15
-    weight_lateral_offset: float = 1.8
+    weight_lateral_offset: float = 0.6
     weight_speed_error: float = 0.7
-    weight_obstacle_clearance: float = 8.0
+    weight_obstacle_clearance: float = 24.0
     weight_curvature: float = 2.5
     weight_curvature_rate: float = 0.8
     weight_lateral_shift: float = 1.2
@@ -283,6 +285,8 @@ class OccupancyGrid:
         vehicle_pose: tuple[float, float, float],
         corridor_radius_m: float = 0.0,
         corridor_sample_step_m: float = 0.10,
+        footprint_front_m: float = 0.0,
+        footprint_rear_m: float = 0.0,
     ) -> tuple[bool, float]:
         if len(xy_points) == 0:
             return False, float("inf")
@@ -290,6 +294,8 @@ class OccupancyGrid:
             xy_points,
             corridor_radius_m,
             corridor_sample_step_m,
+            footprint_front_m,
+            footprint_rear_m,
         )
         local_xy = world_to_vehicle(query_points, vehicle_pose)
         rows, cols, inside = self.local_points_to_indices(local_xy)
@@ -521,6 +527,8 @@ def plan_frenet_path(
                     vehicle_pose,
                     config.corridor_radius_m,
                     config.corridor_sample_step_m,
+                    config.footprint_front_m,
+                    config.footprint_rear_m,
                 )
                 if stats is not None:
                     stats.best_clearance_m = max(stats.best_clearance_m, min_clearance)
@@ -721,12 +729,16 @@ def swept_corridor_points(
     points: np.ndarray,
     corridor_radius_m: float,
     corridor_sample_step_m: float,
+    footprint_front_m: float = 0.0,
+    footprint_rear_m: float = 0.0,
 ) -> np.ndarray:
     points = np.asarray(points, dtype=float)
     if len(points) == 0:
         return points.reshape(0, 2)
     radius = max(0.0, float(corridor_radius_m))
-    if radius <= 1e-9:
+    front = max(0.0, float(footprint_front_m))
+    rear = max(0.0, float(footprint_rear_m))
+    if radius <= 1e-9 and front <= 1e-9 and rear <= 1e-9:
         return points
     step = max(1e-3, float(corridor_sample_step_m))
     offsets = np.arange(-radius, radius + 0.5 * step, step, dtype=float)
@@ -736,8 +748,18 @@ def swept_corridor_points(
         offsets = np.sort(np.append(offsets, 0.0))
 
     headings = estimate_path_headings(points)
+    longitudinal_offsets = np.arange(-rear, front + 0.5 * step, step, dtype=float)
+    if longitudinal_offsets[-1] < front:
+        longitudinal_offsets = np.append(longitudinal_offsets, front)
+    if not np.any(np.isclose(longitudinal_offsets, 0.0)):
+        longitudinal_offsets = np.sort(np.append(longitudinal_offsets, 0.0))
+    tangents = np.column_stack([np.cos(headings), np.sin(headings)])
     normals = np.column_stack([-np.sin(headings), np.cos(headings)])
-    expanded = points[:, None, :] + offsets[None, :, None] * normals[:, None, :]
+    expanded = (
+        points[:, None, None, :]
+        + longitudinal_offsets[None, :, None, None] * tangents[:, None, None, :]
+        + offsets[None, None, :, None] * normals[:, None, None, :]
+    )
     return expanded.reshape(-1, 2)
 
 

@@ -78,9 +78,11 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_d_min', default_value='-1.8'),
         DeclareLaunchArgument('frenet_d_max', default_value='1.8'),
         DeclareLaunchArgument('frenet_max_curvature', default_value='1.1'),
-        DeclareLaunchArgument('frenet_safe_clearance_m', default_value='0.15'),
+        DeclareLaunchArgument('frenet_safe_clearance_m', default_value='0.35'),
         DeclareLaunchArgument('frenet_min_clearance_m', default_value='0.05'),
-        DeclareLaunchArgument('frenet_corridor_radius_m', default_value='0.16'),
+        DeclareLaunchArgument('frenet_corridor_radius_m', default_value='0.14'),
+        DeclareLaunchArgument('frenet_footprint_front_m', default_value='0.38'),
+        DeclareLaunchArgument('frenet_footprint_rear_m', default_value='0.05'),
         DeclareLaunchArgument('frenet_max_heading_jump', default_value='0.85'),
         DeclareLaunchArgument('frenet_min_progress_step_m', default_value='0.20'),
         DeclareLaunchArgument('frenet_reuse_last_candidate_timeout_s', default_value='1.0'),
@@ -225,6 +227,8 @@ def generate_launch_description():
         frenet_safe_clearance = LaunchConfiguration('frenet_safe_clearance_m').perform(context)
         frenet_min_clearance = LaunchConfiguration('frenet_min_clearance_m').perform(context)
         frenet_corridor_radius = LaunchConfiguration('frenet_corridor_radius_m').perform(context)
+        frenet_footprint_front = LaunchConfiguration('frenet_footprint_front_m').perform(context)
+        frenet_footprint_rear = LaunchConfiguration('frenet_footprint_rear_m').perform(context)
         frenet_max_heading_jump = LaunchConfiguration('frenet_max_heading_jump').perform(context)
         frenet_min_progress_step = LaunchConfiguration('frenet_min_progress_step_m').perform(context)
         frenet_reuse_timeout = LaunchConfiguration('frenet_reuse_last_candidate_timeout_s').perform(context)
@@ -271,7 +275,7 @@ def generate_launch_description():
         frenet_enabled = str(enable_frenet).lower() in ('true', '1', 'yes', 'on')
         lqr_path_topic = '/local_trajectory' if frenet_enabled else '/global_trajectory'
         lqr_path_closed_loop = 'false' if frenet_enabled else 'true'
-        lqr_endpoint_stop_max_path_length = '0.5' if frenet_enabled else '1000000000.0'
+        lqr_endpoint_stop_max_path_length = '0.3' if frenet_enabled else '1000000000.0'
         frenet_proc = ExecuteProcess(
             cmd=[
                 'python3', os.path.join(code_dir, 'run_frenet_planner.py'),
@@ -296,6 +300,8 @@ def generate_launch_description():
                 '-p', f'safe_clearance_m:={frenet_safe_clearance}',
                 '-p', f'min_clearance_m:={frenet_min_clearance}',
                 '-p', f'corridor_radius_m:={frenet_corridor_radius}',
+                '-p', f'footprint_front_m:={frenet_footprint_front}',
+                '-p', f'footprint_rear_m:={frenet_footprint_rear}',
                 '-p', f'max_heading_jump:={frenet_max_heading_jump}',
                 '-p', f'min_progress_step_m:={frenet_min_progress_step}',
                 '-p', f'reuse_last_candidate_timeout_s:={frenet_reuse_timeout}',

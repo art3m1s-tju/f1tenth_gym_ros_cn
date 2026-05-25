@@ -62,10 +62,12 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("v_step", 0.3)
         self.declare_parameter("trajectory_dt", 0.1)
         self.declare_parameter("max_curvature", 1.1)
-        self.declare_parameter("safe_clearance_m", 0.15)
+        self.declare_parameter("safe_clearance_m", 0.35)
         self.declare_parameter("min_clearance_m", 0.05)
-        self.declare_parameter("corridor_radius_m", 0.16)
+        self.declare_parameter("corridor_radius_m", 0.14)
         self.declare_parameter("corridor_sample_step_m", 0.10)
+        self.declare_parameter("footprint_front_m", 0.38)
+        self.declare_parameter("footprint_rear_m", 0.05)
         self.declare_parameter("max_heading_jump", 0.65)
         self.declare_parameter("min_progress_step_m", 0.20)
         self.declare_parameter("grid_forward_m", 7.0)
@@ -101,6 +103,8 @@ class FrenetStaticObstaclePlanner(Node):
             corridor_sample_step_m=float(
                 self.get_parameter("corridor_sample_step_m").value
             ),
+            footprint_front_m=float(self.get_parameter("footprint_front_m").value),
+            footprint_rear_m=float(self.get_parameter("footprint_rear_m").value),
             max_heading_jump=float(self.get_parameter("max_heading_jump").value),
             min_progress_step_m=float(self.get_parameter("min_progress_step_m").value),
         )
@@ -400,6 +404,8 @@ class FrenetStaticObstaclePlanner(Node):
             vehicle_pose,
             self.planner_config.corridor_radius_m,
             self.planner_config.corridor_sample_step_m,
+            self.planner_config.footprint_front_m,
+            self.planner_config.footprint_rear_m,
         )
         if collision or min_clearance < self.planner_config.min_clearance_m:
             if now - self.last_reuse_log_time >= 0.5:

@@ -360,6 +360,21 @@ def test_swept_corridor_expands_path_laterally():
     assert np.isclose(np.min(corridor[:, 1]), -0.2)
 
 
+def test_swept_corridor_includes_forward_footprint():
+    points = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+
+    corridor = swept_corridor_points(
+        points,
+        corridor_radius_m=0.0,
+        corridor_sample_step_m=0.1,
+        footprint_front_m=0.35,
+        footprint_rear_m=0.05,
+    )
+
+    assert np.isclose(np.max(corridor[:, 0]), 1.35)
+    assert np.isclose(np.min(corridor[:, 0]), -0.05)
+
+
 def test_occupancy_grid_corridor_detects_vehicle_width_collision():
     cfg = LocalGridConfig(
         forward_m=4.0,
@@ -391,6 +406,37 @@ def test_occupancy_grid_corridor_detects_vehicle_width_collision():
 
     assert not center_collision
     assert corridor_collision
+
+
+def test_occupancy_grid_footprint_detects_front_bumper_collision():
+    cfg = LocalGridConfig(
+        forward_m=4.0,
+        rear_m=1.0,
+        half_width_m=2.0,
+        resolution_m=0.05,
+        inflation_radius_m=0.05,
+        scan_offset_x_m=0.0,
+    )
+    grid = build_occupancy_grid(
+        np.array([1.3]),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=cfg,
+    )
+    base_link_path = np.array([[1.0, 0.0]], dtype=float)
+
+    center_collision, _ = grid.query_path(base_link_path, (0.0, 0.0, 0.0))
+    footprint_collision, _ = grid.query_path(
+        base_link_path,
+        (0.0, 0.0, 0.0),
+        footprint_front_m=0.35,
+        footprint_rear_m=0.05,
+    )
+
+    assert not center_collision
+    assert footprint_collision
 
 
 def test_planner_hard_rejects_low_clearance_candidate():
