@@ -1,0 +1,40 @@
+{
+  "base_yaml": "/sim_ws/src/f1tenth_gym_ros/maps/my_map.yaml",
+  "obstacle_count": 2,
+  "obstacle_distances_m": [
+    4.0,
+    7.0
+  ],
+  "obstacle_size_m": 0.4,
+  "obstacles": [
+    {
+      "center_x_m": 1.1839151,
+      "center_y_m": 0.4658539,
+      "col_range": [
+        210,
+        218
+      ],
+      "row_range": [
+        194,
+        202
+      ],
+      "size_m": 0.4
+    },
+    {
+      "center_x_m": 3.4219409,
+      "center_y_m": -1.0187604,
+      "col_range": [
+        255,
+        263
+      ],
+      "row_range": [
+        223,
+        231
+      ],
+      "size_m": 0.4
+    }
+  ],
+  "output_yaml": "/sim_ws/src/f1tenth_gym_ros/maps/generated_static_obstacles/two_blocks_seed7.yaml",
+  "seed": 7,
+  "trajectory_csv": "/sim_ws/src/f1tenth_gym_ros/code/outputs/csv/global_trajectory.csv"
+}

@@ -1,0 +1,522 @@
+"""CPU Frenet local planner primitives for static obstacle avoidance."""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+from scipy import ndimage
+from scipy.spatial import KDTree
+
+from pnc_rc.lqr.geometry import interpolate_angle, project_to_path
+from pnc_rc.lqr.math import compute_path_curvatures, compute_path_headings, wrap_angle
+
+
+@dataclass(frozen=True)
+class FrenetState:
+    s: float
+    d: float
+    s_dot: float
+    d_dot: float
+    s_ddot: float
+    d_ddot: float
+
+
+@dataclass(frozen=True)
+class FrenetPlannerConfig:
+    d_min: float = -1.0
+    d_max: float = 1.0
+    d_step: float = 0.1
+    t_min: float = 2.0
+    t_max: float = 2.0
+    t_step: float = 0.2
+    v_min: float = 0.6
+    v_max: float = 2.5
+    v_step: float = 0.3
+    trajectory_dt: float = 0.1
+    target_speed: float = 1.5
+    max_curvature: float = 1.8
+    safe_clearance: float = 0.18
+    weight_lateral_jerk: float = 0.15
+    weight_longitudinal_jerk: float = 0.08
+    weight_time: float = 0.15
+    weight_lateral_offset: float = 1.8
+    weight_speed_error: float = 0.7
+    weight_obstacle_clearance: float = 8.0
+    weight_curvature: float = 2.5
+    weight_curvature_rate: float = 0.8
+    weight_lateral_shift: float = 1.2
+
+
+@dataclass(frozen=True)
+class LocalGridConfig:
+    forward_m: float = 7.0
+    rear_m: float = 1.0
+    half_width_m: float = 3.0
+    resolution_m: float = 0.05
+    inflation_radius_m: float = 0.28
+    scan_offset_x_m: float = 0.275
+
+
+@dataclass
+class ReferencePath:
+    points: np.ndarray
+    headings: np.ndarray
+    curvatures: np.ndarray
+    segment_lengths: np.ndarray
+    cumulative_s: np.ndarray
+    kdtree: KDTree
+    total_length: float
+
+    @classmethod
+    def from_points(cls, points: np.ndarray) -> "ReferencePath":
+        if len(points) < 3:
+            raise ValueError("reference path needs at least 3 points")
+        points = np.asarray(points, dtype=float)
+        closed = np.vstack([points, points[:1]])
+        segment_lengths = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+        total_length = float(np.sum(segment_lengths))
+        cumulative_s = np.concatenate([[0.0], np.cumsum(segment_lengths[:-1])])
+        return cls(
+            points=points,
+            headings=compute_path_headings(points, closed_loop=True),
+            curvatures=compute_path_curvatures(points, closed_loop=True),
+            segment_lengths=segment_lengths,
+            cumulative_s=cumulative_s,
+            kdtree=KDTree(points),
+            total_length=total_length,
+        )
+
+    def project(self, position: np.ndarray) -> tuple[float, float, float, float]:
+        projection = project_to_path(
+            position,
+            self.points,
+            self.kdtree,
+            self.headings,
+            self.curvatures,
+            closed_loop=True,
+        )
+        segment_length = float(self.segment_lengths[projection.segment_idx])
+        s = float(
+            self.cumulative_s[projection.segment_idx]
+            + projection.segment_t * segment_length
+        )
+        return s, projection.lateral_error, projection.heading, projection.curvature
+
+    def sample(self, s: float, d: float) -> tuple[np.ndarray, float, float]:
+        s = float(s % self.total_length)
+        segment_idx = int(np.searchsorted(self.cumulative_s, s, side="right") - 1)
+        segment_idx = int(np.clip(segment_idx, 0, len(self.points) - 1))
+        segment_length = float(self.segment_lengths[segment_idx])
+        if segment_length <= 1e-9:
+            t = 0.0
+        else:
+            t = float((s - self.cumulative_s[segment_idx]) / segment_length)
+        next_idx = (segment_idx + 1) % len(self.points)
+        point = (
+            self.points[segment_idx]
+            + t * (self.points[next_idx] - self.points[segment_idx])
+        )
+        heading = interpolate_angle(
+            float(self.headings[segment_idx]),
+            float(self.headings[next_idx]),
+            t,
+        )
+        curvature = float(
+            (1.0 - t) * self.curvatures[segment_idx]
+            + t * self.curvatures[next_idx]
+        )
+        normal = np.array([-math.sin(heading), math.cos(heading)])
+        return point + d * normal, heading, curvature
+
+
+@dataclass(frozen=True)
+class OccupancyGrid:
+    occupied: np.ndarray
+    distance_to_obstacle_m: np.ndarray
+    config: LocalGridConfig
+
+    @property
+    def has_obstacles(self) -> bool:
+        return bool(np.any(self.occupied))
+
+    def query_path(
+        self,
+        xy_points: np.ndarray,
+        vehicle_pose: tuple[float, float, float],
+    ) -> tuple[bool, float]:
+        if len(xy_points) == 0:
+            return False, float("inf")
+        local_xy = world_to_vehicle(xy_points, vehicle_pose)
+        rows, cols, inside = self.local_points_to_indices(local_xy)
+        if not np.any(inside):
+            return False, float("inf")
+        inside_rows = rows[inside]
+        inside_cols = cols[inside]
+        collision = bool(np.any(self.occupied[inside_rows, inside_cols]))
+        min_distance = float(np.min(self.distance_to_obstacle_m[inside_rows, inside_cols]))
+        return collision, min_distance
+
+    def local_points_to_indices(
+        self,
+        local_xy: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _local_points_to_indices(local_xy, self.occupied.shape, self.config)
+
+
+@dataclass(frozen=True)
+class CandidatePath:
+    xy: np.ndarray
+    s: np.ndarray
+    d: np.ndarray
+    s_dot: np.ndarray
+    d_dot: np.ndarray
+    cost: float
+    min_clearance_m: float
+    max_curvature: float
+
+
+@dataclass
+class FrenetPlanStats:
+    total_candidates: int = 0
+    collision_rejections: int = 0
+    safe_candidates: int = 0
+    best_clearance_m: float = 0.0
+
+
+def build_occupancy_grid(
+    ranges: np.ndarray,
+    angle_min: float,
+    angle_increment: float,
+    range_min: float,
+    range_max: float,
+    config: LocalGridConfig,
+    static_occupied: np.ndarray | None = None,
+) -> OccupancyGrid:
+    height = int(math.ceil((2.0 * config.half_width_m) / config.resolution_m))
+    width = int(math.ceil((config.forward_m + config.rear_m) / config.resolution_m))
+    raw = np.zeros((height, width), dtype=bool)
+    if static_occupied is not None:
+        raw |= static_occupied
+
+    ranges = np.asarray(ranges, dtype=float)
+    indices = np.arange(len(ranges), dtype=float)
+    angles = angle_min + indices * angle_increment
+    valid = np.isfinite(ranges) & (ranges >= range_min) & (ranges <= range_max)
+    if np.any(valid):
+        x = ranges[valid] * np.cos(angles[valid]) + config.scan_offset_x_m
+        y = ranges[valid] * np.sin(angles[valid])
+        rows, cols, inside = _local_points_to_indices(np.column_stack([x, y]), raw.shape, config)
+        raw[rows[inside], cols[inside]] = True
+
+    if not np.any(raw):
+        occupied = np.zeros_like(raw, dtype=bool)
+        clearance = np.full(raw.shape, float("inf"), dtype=float)
+        return OccupancyGrid(
+            occupied=occupied,
+            distance_to_obstacle_m=clearance,
+            config=config,
+        )
+
+    distance_to_raw = ndimage.distance_transform_edt(~raw) * config.resolution_m
+    occupied = distance_to_raw <= config.inflation_radius_m
+    clearance = np.maximum(0.0, distance_to_raw - config.inflation_radius_m)
+    return OccupancyGrid(occupied=occupied, distance_to_obstacle_m=clearance, config=config)
+
+
+def local_static_map_occupancy(
+    map_occupied: np.ndarray,
+    map_resolution: float,
+    map_origin_xy: tuple[float, float],
+    vehicle_pose: tuple[float, float, float],
+    config: LocalGridConfig,
+) -> np.ndarray:
+    height = int(math.ceil((2.0 * config.half_width_m) / config.resolution_m))
+    width = int(math.ceil((config.forward_m + config.rear_m) / config.resolution_m))
+    col_values = (np.arange(width, dtype=float) + 0.5) * config.resolution_m - config.rear_m
+    row_values = (np.arange(height, dtype=float) + 0.5) * config.resolution_m - config.half_width_m
+    local_x, local_y = np.meshgrid(col_values, row_values)
+    world_x, world_y = vehicle_to_world(local_x, local_y, vehicle_pose)
+    map_rows, map_cols, inside = world_points_to_map_indices(
+        world_x,
+        world_y,
+        map_resolution,
+        map_origin_xy,
+        map_occupied.shape,
+    )
+    occupied = np.ones((height, width), dtype=bool)
+    occupied[inside] = map_occupied[map_rows[inside], map_cols[inside]]
+    return occupied
+
+
+def world_to_vehicle(points_xy: np.ndarray, vehicle_pose: tuple[float, float, float]) -> np.ndarray:
+    x, y, yaw = vehicle_pose
+    shifted = np.asarray(points_xy, dtype=float) - np.array([x, y], dtype=float)
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return np.column_stack(
+        [
+            cos_yaw * shifted[:, 0] + sin_yaw * shifted[:, 1],
+            -sin_yaw * shifted[:, 0] + cos_yaw * shifted[:, 1],
+        ]
+    )
+
+
+def vehicle_to_world(
+    local_x: np.ndarray,
+    local_y: np.ndarray,
+    vehicle_pose: tuple[float, float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    x, y, yaw = vehicle_pose
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    world_x = x + cos_yaw * local_x - sin_yaw * local_y
+    world_y = y + sin_yaw * local_x + cos_yaw * local_y
+    return world_x, world_y
+
+
+def world_points_to_map_indices(
+    world_x: np.ndarray,
+    world_y: np.ndarray,
+    map_resolution: float,
+    map_origin_xy: tuple[float, float],
+    map_shape: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    cols = np.floor((world_x - map_origin_xy[0]) / map_resolution).astype(int)
+    rows_from_bottom = np.floor((world_y - map_origin_xy[1]) / map_resolution).astype(int)
+    rows = map_shape[0] - 1 - rows_from_bottom
+    inside = (
+        (rows >= 0)
+        & (rows < map_shape[0])
+        & (cols >= 0)
+        & (cols < map_shape[1])
+    )
+    return rows, cols, inside
+
+
+def initial_frenet_state(
+    reference: ReferencePath,
+    position: np.ndarray,
+    yaw: float,
+    velocity_xy: np.ndarray,
+    previous_s_dot: float | None,
+    dt: float | None,
+) -> FrenetState:
+    s, d, heading, _ = reference.project(position)
+    tangent = np.array([math.cos(heading), math.sin(heading)])
+    normal = np.array([-math.sin(heading), math.cos(heading)])
+    s_dot = max(0.0, float(np.dot(velocity_xy, tangent)))
+    d_dot = float(np.dot(velocity_xy, normal))
+    if previous_s_dot is None or dt is None or dt <= 1e-6:
+        s_ddot = 0.0
+    else:
+        s_ddot = float(np.clip((s_dot - previous_s_dot) / dt, -4.0, 4.0))
+    d_dot += s_dot * math.sin(wrap_angle(yaw - heading))
+    return FrenetState(s=s, d=d, s_dot=s_dot, d_dot=d_dot, s_ddot=s_ddot, d_ddot=0.0)
+
+
+def plan_frenet_path(
+    reference: ReferencePath,
+    state: FrenetState,
+    occupancy: OccupancyGrid,
+    vehicle_pose: tuple[float, float, float],
+    config: FrenetPlannerConfig,
+    stats: FrenetPlanStats | None = None,
+) -> CandidatePath | None:
+    candidates: list[CandidatePath] = []
+    for d_final in _sample_range(config.d_min, config.d_max, config.d_step):
+        for duration in _sample_range(config.t_min, config.t_max, config.t_step):
+            d_coeff = solve_quintic_lateral(state, d_final, duration)
+            time_values = np.arange(
+                0.0,
+                duration + 0.5 * config.trajectory_dt,
+                config.trajectory_dt,
+            )
+            d_values, d_dot_values, _, d_jerk_values = evaluate_quintic(d_coeff, time_values)
+            for speed_final in _sample_range(config.v_min, config.v_max, config.v_step):
+                s_coeff = solve_quartic_longitudinal(state, speed_final, duration)
+                s_values, s_dot_values, _, s_jerk_values = evaluate_quartic(s_coeff, time_values)
+                xy = np.array([reference.sample(s, d)[0] for s, d in zip(s_values, d_values)])
+                if stats is not None:
+                    stats.total_candidates += 1
+                collision, min_clearance = occupancy.query_path(xy, vehicle_pose)
+                if stats is not None:
+                    stats.best_clearance_m = max(stats.best_clearance_m, min_clearance)
+                if collision:
+                    if stats is not None:
+                        stats.collision_rejections += 1
+                    continue
+                if stats is not None:
+                    stats.safe_candidates += 1
+                candidates.append(
+                    score_candidate(
+                        xy,
+                        s_values,
+                        d_values,
+                        s_dot_values,
+                        d_dot_values,
+                        d_jerk_values,
+                        s_jerk_values,
+                        duration,
+                        min_clearance,
+                        config,
+                    )
+                )
+    if not candidates:
+        return None
+    return min(candidates, key=lambda candidate: candidate.cost)
+
+
+def score_candidate(
+    xy: np.ndarray,
+    s_values: np.ndarray,
+    d_values: np.ndarray,
+    s_dot_values: np.ndarray,
+    d_dot_values: np.ndarray,
+    d_jerk_values: np.ndarray,
+    s_jerk_values: np.ndarray,
+    duration: float,
+    min_clearance: float,
+    config: FrenetPlannerConfig,
+) -> CandidatePath:
+    path_curvature = estimate_open_path_curvature(xy)
+    if len(path_curvature):
+        max_curvature = float(np.max(np.abs(path_curvature)))
+    else:
+        max_curvature = 0.0
+    if len(path_curvature) > 1:
+        curvature_rate = float(np.mean(np.abs(np.diff(path_curvature))))
+    else:
+        curvature_rate = 0.0
+    lateral_shift = float(np.max(np.abs(np.diff(d_values)))) if len(d_values) > 1 else 0.0
+    clearance_deficit = max(0.0, config.safe_clearance - min_clearance)
+    speed_error = float((config.target_speed - s_dot_values[-1]) ** 2)
+
+    cost = (
+        config.weight_lateral_jerk * float(np.sum(d_jerk_values**2))
+        + config.weight_longitudinal_jerk * float(np.sum(s_jerk_values**2))
+        + config.weight_time * duration
+        + config.weight_lateral_offset * float(d_values[-1] ** 2)
+        + config.weight_speed_error * speed_error
+        + config.weight_obstacle_clearance * clearance_deficit**2
+        + config.weight_curvature * max(0.0, max_curvature - config.max_curvature) ** 2
+        + config.weight_curvature_rate * curvature_rate
+        + config.weight_lateral_shift * lateral_shift
+    )
+    return CandidatePath(
+        xy=xy,
+        s=s_values,
+        d=d_values,
+        s_dot=s_dot_values,
+        d_dot=d_dot_values,
+        cost=float(cost),
+        min_clearance_m=float(min_clearance),
+        max_curvature=max_curvature,
+    )
+
+
+def solve_quintic_lateral(state: FrenetState, d_final: float, duration: float) -> np.ndarray:
+    a0 = state.d
+    a1 = state.d_dot
+    a2 = 0.5 * state.d_ddot
+    t = duration
+    matrix = np.array(
+        [
+            [t**3, t**4, t**5],
+            [3.0 * t**2, 4.0 * t**3, 5.0 * t**4],
+            [6.0 * t, 12.0 * t**2, 20.0 * t**3],
+        ],
+        dtype=float,
+    )
+    rhs = np.array(
+        [
+            d_final - (a0 + a1 * t + a2 * t**2),
+            -(a1 + 2.0 * a2 * t),
+            -(2.0 * a2),
+        ],
+        dtype=float,
+    )
+    a3, a4, a5 = np.linalg.solve(matrix, rhs)
+    return np.array([a0, a1, a2, a3, a4, a5], dtype=float)
+
+
+def solve_quartic_longitudinal(
+    state: FrenetState,
+    speed_final: float,
+    duration: float,
+) -> np.ndarray:
+    b0 = state.s
+    b1 = state.s_dot
+    b2 = 0.5 * state.s_ddot
+    t = duration
+    matrix = np.array(
+        [
+            [3.0 * t**2, 4.0 * t**3],
+            [6.0 * t, 12.0 * t**2],
+        ],
+        dtype=float,
+    )
+    rhs = np.array(
+        [
+            speed_final - (b1 + 2.0 * b2 * t),
+            -(2.0 * b2),
+        ],
+        dtype=float,
+    )
+    b3, b4 = np.linalg.solve(matrix, rhs)
+    return np.array([b0, b1, b2, b3, b4], dtype=float)
+
+
+def evaluate_quintic(
+    coefficients: np.ndarray,
+    time_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    a0, a1, a2, a3, a4, a5 = coefficients
+    t = time_values
+    position = a0 + a1 * t + a2 * t**2 + a3 * t**3 + a4 * t**4 + a5 * t**5
+    velocity = a1 + 2.0 * a2 * t + 3.0 * a3 * t**2 + 4.0 * a4 * t**3 + 5.0 * a5 * t**4
+    acceleration = 2.0 * a2 + 6.0 * a3 * t + 12.0 * a4 * t**2 + 20.0 * a5 * t**3
+    jerk = 6.0 * a3 + 24.0 * a4 * t + 60.0 * a5 * t**2
+    return position, velocity, acceleration, jerk
+
+
+def evaluate_quartic(
+    coefficients: np.ndarray,
+    time_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    b0, b1, b2, b3, b4 = coefficients
+    t = time_values
+    position = b0 + b1 * t + b2 * t**2 + b3 * t**3 + b4 * t**4
+    velocity = b1 + 2.0 * b2 * t + 3.0 * b3 * t**2 + 4.0 * b4 * t**3
+    acceleration = 2.0 * b2 + 6.0 * b3 * t + 12.0 * b4 * t**2
+    jerk = 6.0 * b3 + 24.0 * b4 * t
+    return position, velocity, acceleration, jerk
+
+
+def estimate_open_path_curvature(points: np.ndarray) -> np.ndarray:
+    if len(points) < 3:
+        return np.zeros(len(points), dtype=float)
+    dx = np.gradient(points[:, 0])
+    dy = np.gradient(points[:, 1])
+    ddx = np.gradient(dx)
+    ddy = np.gradient(dy)
+    denominator = np.maximum((dx * dx + dy * dy) ** 1.5, 1e-9)
+    return (dx * ddy - dy * ddx) / denominator
+
+
+def _sample_range(start: float, stop: float, step: float) -> np.ndarray:
+    if step <= 0.0:
+        return np.array([start], dtype=float)
+    count = int(math.floor((stop - start) / step + 0.5)) + 1
+    return start + step * np.arange(max(1, count), dtype=float)
+
+
+def _local_points_to_indices(
+    local_xy: np.ndarray,
+    shape: tuple[int, int],
+    config: LocalGridConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    cols = np.floor((local_xy[:, 0] + config.rear_m) / config.resolution_m).astype(int)
+    rows = np.floor((local_xy[:, 1] + config.half_width_m) / config.resolution_m).astype(int)
+    inside = (cols >= 0) & (cols < shape[1]) & (rows >= 0) & (rows < shape[0])
+    return rows, cols, inside

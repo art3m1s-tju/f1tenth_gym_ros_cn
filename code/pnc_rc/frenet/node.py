@@ -1,0 +1,312 @@
+"""ROS 2 node for Frenet static obstacle avoidance."""
+from __future__ import annotations
+
+import math
+import time
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
+from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path as PathMsg
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from sensor_msgs.msg import LaserScan
+
+from pnc_rc.frenet.planner import (
+    FrenetPlanStats,
+    FrenetPlannerConfig,
+    LocalGridConfig,
+    ReferencePath,
+    build_occupancy_grid,
+    initial_frenet_state,
+    local_static_map_occupancy,
+    plan_frenet_path,
+)
+
+
+def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def yaw_to_quaternion(yaw: float) -> tuple[float, float]:
+    return math.sin(0.5 * yaw), math.cos(0.5 * yaw)
+
+
+class FrenetStaticObstaclePlanner(Node):
+    """Publish a local Frenet path that avoids inflated LaserScan obstacles."""
+
+    def __init__(self) -> None:
+        super().__init__("frenet_static_obstacle_planner")
+
+        self.declare_parameter("global_path_topic", "/global_trajectory")
+        self.declare_parameter("local_path_topic", "/local_trajectory")
+        self.declare_parameter("odom_topic", "/ego_racecar/odom")
+        self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("map_topic", "/map")
+        self.declare_parameter("frame_id", "map")
+        self.declare_parameter("publish_rate_hz", 20.0)
+        self.declare_parameter("target_speed", 1.5)
+        self.declare_parameter("d_min", -1.0)
+        self.declare_parameter("d_max", 1.0)
+        self.declare_parameter("d_step", 0.1)
+        self.declare_parameter("t_min", 2.0)
+        self.declare_parameter("t_max", 2.0)
+        self.declare_parameter("t_step", 0.2)
+        self.declare_parameter("v_min", 0.6)
+        self.declare_parameter("v_max", 2.5)
+        self.declare_parameter("v_step", 0.3)
+        self.declare_parameter("trajectory_dt", 0.1)
+        self.declare_parameter("grid_forward_m", 7.0)
+        self.declare_parameter("grid_rear_m", 1.0)
+        self.declare_parameter("grid_half_width_m", 3.0)
+        self.declare_parameter("grid_resolution_m", 0.05)
+        self.declare_parameter("grid_inflation_radius_m", 0.28)
+        self.declare_parameter("scan_offset_x_m", 0.275)
+
+        self.frame_id = str(self.get_parameter("frame_id").value)
+        self.planner_config = FrenetPlannerConfig(
+            d_min=float(self.get_parameter("d_min").value),
+            d_max=float(self.get_parameter("d_max").value),
+            d_step=float(self.get_parameter("d_step").value),
+            t_min=float(self.get_parameter("t_min").value),
+            t_max=float(self.get_parameter("t_max").value),
+            t_step=float(self.get_parameter("t_step").value),
+            v_min=float(self.get_parameter("v_min").value),
+            v_max=float(self.get_parameter("v_max").value),
+            v_step=float(self.get_parameter("v_step").value),
+            trajectory_dt=float(self.get_parameter("trajectory_dt").value),
+            target_speed=float(self.get_parameter("target_speed").value),
+        )
+        self.grid_config = LocalGridConfig(
+            forward_m=float(self.get_parameter("grid_forward_m").value),
+            rear_m=float(self.get_parameter("grid_rear_m").value),
+            half_width_m=float(self.get_parameter("grid_half_width_m").value),
+            resolution_m=float(self.get_parameter("grid_resolution_m").value),
+            inflation_radius_m=float(self.get_parameter("grid_inflation_radius_m").value),
+            scan_offset_x_m=float(self.get_parameter("scan_offset_x_m").value),
+        )
+
+        qos_profile = QoSProfile(depth=1)
+        qos_profile.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        map_qos_profile = QoSProfile(depth=1)
+        map_qos_profile.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.path_pub = self.create_publisher(
+            PathMsg,
+            str(self.get_parameter("local_path_topic").value),
+            qos_profile,
+        )
+        self.global_path_sub = self.create_subscription(
+            PathMsg,
+            str(self.get_parameter("global_path_topic").value),
+            self.global_path_callback,
+            qos_profile,
+        )
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            str(self.get_parameter("odom_topic").value),
+            self.odom_callback,
+            10,
+        )
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            str(self.get_parameter("scan_topic").value),
+            self.scan_callback,
+            10,
+        )
+        self.map_sub = self.create_subscription(
+            OccupancyGridMsg,
+            str(self.get_parameter("map_topic").value),
+            self.map_callback,
+            map_qos_profile,
+        )
+
+        self.reference: ReferencePath | None = None
+        self.latest_odom: Odometry | None = None
+        self.latest_scan: LaserScan | None = None
+        self.map_occupied: np.ndarray | None = None
+        self.map_resolution: float | None = None
+        self.map_origin_xy: tuple[float, float] | None = None
+        self.map_logged = False
+        self.previous_s_dot: float | None = None
+        self.previous_plan_time: float | None = None
+        self.last_no_candidate_log_time = 0.0
+        publish_rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
+        self.timer = self.create_timer(1.0 / publish_rate, self.plan_once)
+        self.get_logger().info(
+            "Frenet static obstacle planner started "
+            f"(local_path={self.path_pub.topic_name}, rate={publish_rate:.1f}Hz)."
+        )
+
+    def global_path_callback(self, msg: PathMsg) -> None:
+        points = np.array(
+            [[pose.pose.position.x, pose.pose.position.y] for pose in msg.poses],
+            dtype=float,
+        )
+        if len(points) < 3:
+            self.get_logger().warning("Ignoring global path with fewer than 3 points.")
+            return
+        self.reference = ReferencePath.from_points(points)
+        self.frame_id = msg.header.frame_id or self.frame_id
+
+    def odom_callback(self, msg: Odometry) -> None:
+        self.latest_odom = msg
+
+    def scan_callback(self, msg: LaserScan) -> None:
+        self.latest_scan = msg
+
+    def map_callback(self, msg: OccupancyGridMsg) -> None:
+        data = np.asarray(msg.data, dtype=np.int16).reshape(
+            (msg.info.height, msg.info.width)
+        )
+        self.map_occupied = np.flipud(data >= 50)
+        self.map_resolution = float(msg.info.resolution)
+        self.map_origin_xy = (
+            float(msg.info.origin.position.x),
+            float(msg.info.origin.position.y),
+        )
+        if not self.map_logged:
+            self.map_logged = True
+            occupied_cells = int(np.count_nonzero(self.map_occupied))
+            self.get_logger().info(
+                "Loaded static occupancy map "
+                f"({msg.info.width}x{msg.info.height}, "
+                f"resolution={self.map_resolution:.3f}m, "
+                f"occupied_cells={occupied_cells})."
+            )
+
+    def plan_once(self) -> None:
+        if self.reference is None or self.latest_odom is None:
+            return
+        stamp = self.get_clock().now().to_msg()
+        position, yaw, velocity_xy = self._odom_state(self.latest_odom)
+        now = time.monotonic()
+        dt = None if self.previous_plan_time is None else now - self.previous_plan_time
+        state = initial_frenet_state(
+            self.reference,
+            position,
+            yaw,
+            velocity_xy,
+            self.previous_s_dot,
+            dt,
+        )
+        self.previous_s_dot = state.s_dot
+        self.previous_plan_time = now
+
+        if self.latest_scan is None:
+            self.publish_stop_path(stamp, position, yaw)
+            return
+
+        scan = self.latest_scan
+        vehicle_pose = (float(position[0]), float(position[1]), yaw)
+        static_occupancy = self.local_map_occupancy(vehicle_pose)
+        occupancy = build_occupancy_grid(
+            np.asarray(scan.ranges, dtype=float),
+            float(scan.angle_min),
+            float(scan.angle_increment),
+            float(scan.range_min),
+            float(scan.range_max),
+            self.grid_config,
+            static_occupied=static_occupancy,
+        )
+        stats = FrenetPlanStats()
+        candidate = plan_frenet_path(
+            self.reference,
+            state,
+            occupancy,
+            vehicle_pose,
+            self.planner_config,
+            stats,
+        )
+        if candidate is None:
+            self.log_no_candidate(stats, occupancy, static_occupancy is not None)
+            self.publish_stop_path(stamp, position, yaw)
+            return
+        self.publish_path(stamp, candidate.xy)
+
+    def log_no_candidate(
+        self,
+        stats: FrenetPlanStats,
+        occupancy,
+        static_map_ready: bool,
+    ) -> None:
+        now = time.monotonic()
+        if now - self.last_no_candidate_log_time < 0.5:
+            return
+        self.last_no_candidate_log_time = now
+        occupied_cells = int(np.count_nonzero(occupancy.occupied))
+        self.get_logger().warning(
+            "No safe Frenet candidate; publishing stop path "
+            f"(total={stats.total_candidates}, safe={stats.safe_candidates}, "
+            f"collision_reject={stats.collision_rejections}, "
+            f"best_clearance={stats.best_clearance_m:.2f}m, "
+            f"occupied_cells={occupied_cells}, static_map_ready={static_map_ready})."
+        )
+
+    def publish_stop_path(self, stamp, position: np.ndarray, yaw: float) -> None:
+        forward = np.array([math.cos(yaw), math.sin(yaw)], dtype=float)
+        offsets = np.array([0.0, 0.05, 0.10], dtype=float)
+        points = position.reshape(1, 2) + offsets.reshape(-1, 1) * forward.reshape(1, 2)
+        self.publish_path(stamp, points)
+
+    def publish_path(self, stamp, points: np.ndarray) -> None:
+        path_msg = PathMsg()
+        path_msg.header.stamp = stamp
+        path_msg.header.frame_id = self.frame_id
+        for idx, point in enumerate(points):
+            prev_point = points[max(0, idx - 1)]
+            next_point = points[min(len(points) - 1, idx + 1)]
+            yaw = math.atan2(next_point[1] - prev_point[1], next_point[0] - prev_point[0])
+            qz, qw = yaw_to_quaternion(yaw)
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = float(point[0])
+            pose.pose.position.y = float(point[1])
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.z = qz
+            pose.pose.orientation.w = qw
+            path_msg.poses.append(pose)
+        self.path_pub.publish(path_msg)
+
+    def local_map_occupancy(self, vehicle_pose: tuple[float, float, float]) -> np.ndarray | None:
+        if (
+            self.map_occupied is None
+            or self.map_resolution is None
+            or self.map_origin_xy is None
+        ):
+            return None
+        return local_static_map_occupancy(
+            self.map_occupied,
+            self.map_resolution,
+            self.map_origin_xy,
+            vehicle_pose,
+            self.grid_config,
+        )
+
+    def _odom_state(self, msg: Odometry) -> tuple[np.ndarray, float, np.ndarray]:
+        pose = msg.pose.pose
+        twist = msg.twist.twist
+        yaw = quaternion_to_yaw(
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        )
+        position = np.array([pose.position.x, pose.position.y], dtype=float)
+        velocity_xy = np.array([twist.linear.x, twist.linear.y], dtype=float)
+        return position, yaw, velocity_xy
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = None
+    try:
+        node = FrenetStaticObstaclePlanner()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()

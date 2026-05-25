@@ -21,13 +21,21 @@ def generate_launch_description():
     # Declare launch arguments
     launch_args = [
         DeclareLaunchArgument('enable_rviz', default_value='true'),
+        DeclareLaunchArgument(
+            'map_path',
+            default_value=config_dict['bridge']['ros__parameters']['map_path'],
+        ),
+        DeclareLaunchArgument(
+            'map_img_ext',
+            default_value=config_dict['bridge']['ros__parameters']['map_img_ext'],
+        ),
         DeclareLaunchArgument('target_speed', default_value='1.0'),
         DeclareLaunchArgument('min_speed', default_value='0.4'),
         DeclareLaunchArgument('lqr_q_lateral', default_value='3.0'),
         DeclareLaunchArgument('lqr_q_heading', default_value='1.2'),
         DeclareLaunchArgument('lqr_r_steering', default_value='8.0'),
         DeclareLaunchArgument('lqr_feedforward_gain', default_value='1.0'),
-        DeclareLaunchArgument('lqr_lookahead_distance_m', default_value='1.5'),
+        DeclareLaunchArgument('lqr_lookahead_distance_m', default_value='0.0'),
         DeclareLaunchArgument('lqr_gain_table_path', default_value=''),
         DeclareLaunchArgument('max_lateral_accel', default_value='4.0'),
         DeclareLaunchArgument('max_steering_angle', default_value='0.36'),
@@ -46,6 +54,12 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_error_filter', default_value='false'),
         DeclareLaunchArgument('error_filter_alpha_y', default_value='0.30'),
         DeclareLaunchArgument('error_filter_alpha_psi', default_value='0.25'),
+        DeclareLaunchArgument('enable_frenet_planner', default_value='false'),
+        DeclareLaunchArgument('frenet_publish_rate_hz', default_value='20.0'),
+        DeclareLaunchArgument('frenet_d_min', default_value='-1.0'),
+        DeclareLaunchArgument('frenet_d_max', default_value='1.0'),
+        DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
+        DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
         DeclareLaunchArgument('control_friendly_alpha', default_value='0.56'),
         DeclareLaunchArgument('control_friendly_auto_alpha', default_value='true'),
@@ -64,7 +78,13 @@ def generate_launch_description():
         package='f1tenth_gym_ros',
         executable='gym_bridge',
         name='bridge',
-        parameters=[sim_config],
+        parameters=[
+            sim_config,
+            {
+                'map_path': LaunchConfiguration('map_path'),
+                'map_img_ext': LaunchConfiguration('map_img_ext'),
+            },
+        ],
     )
 
     rviz_node = Node(
@@ -79,7 +99,7 @@ def generate_launch_description():
         package='nav2_map_server',
         executable='map_server',
         parameters=[
-            {'yaml_filename': config_dict['bridge']['ros__parameters']['map_path'] + '.yaml'},
+            {'yaml_filename': [LaunchConfiguration('map_path'), '.yaml']},
             {'topic': 'map'},
             {'frame_id': 'map'},
             {'output': 'screen'},
@@ -147,6 +167,12 @@ def generate_launch_description():
         error_filter = LaunchConfiguration('enable_error_filter').perform(context)
         error_alpha_y = LaunchConfiguration('error_filter_alpha_y').perform(context)
         error_alpha_psi = LaunchConfiguration('error_filter_alpha_psi').perform(context)
+        enable_frenet = LaunchConfiguration('enable_frenet_planner').perform(context)
+        frenet_rate = LaunchConfiguration('frenet_publish_rate_hz').perform(context)
+        frenet_d_min = LaunchConfiguration('frenet_d_min').perform(context)
+        frenet_d_max = LaunchConfiguration('frenet_d_max').perform(context)
+        frenet_inflation = LaunchConfiguration('frenet_grid_inflation_radius_m').perform(context)
+        frenet_resolution = LaunchConfiguration('frenet_grid_resolution_m').perform(context)
         traj_mode = LaunchConfiguration('trajectory_mode').perform(context)
         cf_alpha = LaunchConfiguration('control_friendly_alpha').perform(context)
         cf_auto = LaunchConfiguration('control_friendly_auto_alpha').perform(context)
@@ -178,17 +204,42 @@ def generate_launch_description():
             output='screen',
         )
 
+        frenet_enabled = str(enable_frenet).lower() in ('true', '1', 'yes', 'on')
+        lqr_path_topic = '/local_trajectory' if frenet_enabled else '/global_trajectory'
+        lqr_path_closed_loop = 'false' if frenet_enabled else 'true'
+        frenet_proc = ExecuteProcess(
+            cmd=[
+                'python3', os.path.join(code_dir, 'run_frenet_planner.py'),
+                '--ros-args',
+                '-r', '__node:=frenet_static_obstacle_planner',
+                '-p', 'global_path_topic:=/global_trajectory',
+                '-p', 'local_path_topic:=/local_trajectory',
+                '-p', 'odom_topic:=/ego_racecar/odom',
+                '-p', 'scan_topic:=/scan',
+                '-p', 'map_topic:=/map',
+                '-p', 'frame_id:=map',
+                '-p', f'publish_rate_hz:={frenet_rate}',
+                '-p', f'target_speed:={target_speed}',
+                '-p', f'v_max:={target_speed}',
+                '-p', f'd_min:={frenet_d_min}',
+                '-p', f'd_max:={frenet_d_max}',
+                '-p', f'grid_inflation_radius_m:={frenet_inflation}',
+                '-p', f'grid_resolution_m:={frenet_resolution}',
+            ],
+            output='screen',
+        )
+
         lqr_cmd = [
             'python3', os.path.join(code_dir, 'run_lqr.py'),
             '--ros-args',
             '-r', '__node:=lqr_controller',
-            '-p', 'path_topic:=/global_trajectory',
+            '-p', f'path_topic:={lqr_path_topic}',
             '-p', 'odom_topic:=/ego_racecar/odom',
             '-p', 'drive_topic:=/drive',
             '-p', f'use_tf_pose:={use_tf_pose}',
             '-p', 'vehicle_frame:=ego_racecar/base_link',
             '-p', 'tf_lookup_timeout_sec:=0.05',
-            '-p', 'path_closed_loop:=true',
+            '-p', f'path_closed_loop:={lqr_path_closed_loop}',
             '-p', 'wheelbase:=0.3302',
             '-p', f'target_speed:={target_speed}',
             '-p', f'min_speed:={min_speed}',
@@ -224,7 +275,11 @@ def generate_launch_description():
             output='screen',
         )
 
-        return [planner_proc, lqr_proc]
+        processes = [planner_proc]
+        if frenet_enabled:
+            processes.append(frenet_proc)
+        processes.append(lqr_proc)
+        return processes
 
     ld = LaunchDescription(launch_args)
     ld.add_action(bridge_node)
