@@ -670,15 +670,28 @@ class FrenetStaticObstaclePlanner(Node):
         marker_array = MarkerArray()
         marker_array.markers.append(self._delete_all_marker(stamp))
 
-        for marker_id, candidate in enumerate(candidates[: self.debug_max_safe_candidates]):
-            is_best = best_candidate is not None and candidate is best_candidate
+        marker_id = 0
+        for candidate in candidates[: self.debug_max_safe_candidates]:
+            if best_candidate is not None and candidate is best_candidate:
+                continue
             marker = self._candidate_marker(
                 stamp,
                 candidate.xy,
                 marker_id,
-                is_best=is_best,
+                is_best=False,
             )
             marker_array.markers.append(marker)
+            marker_id += 1
+
+        if best_candidate is not None:
+            marker_array.markers.append(
+                self._candidate_marker(
+                    stamp,
+                    best_candidate.xy,
+                    10000,
+                    is_best=True,
+                )
+            )
 
         self.debug_marker_pub.publish(marker_array)
 
@@ -751,21 +764,21 @@ class FrenetStaticObstaclePlanner(Node):
         marker = Marker()
         marker.header.frame_id = self.frame_id
         marker.header.stamp = stamp
-        marker.ns = "frenet_candidates"
+        marker.ns = "frenet_best_candidate" if is_best else "frenet_candidate_set"
         marker.id = marker_id
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
         marker.pose.orientation.w = 1.0
-        marker.scale.x = 0.07 if is_best else 0.025
-        marker.color.a = 0.95 if is_best else 0.35
-        marker.color.r = 1.0 if is_best else 0.15
-        marker.color.g = 0.75 if is_best else 0.95
-        marker.color.b = 0.15 if is_best else 1.0
+        marker.scale.x = 0.085 if is_best else 0.03
+        marker.color.a = 1.0 if is_best else 0.42
+        marker.color.r = 1.0 if is_best else 0.05
+        marker.color.g = 0.08 if is_best else 0.65
+        marker.color.b = 0.08 if is_best else 1.0
         for x_value, y_value in points:
             point = Point()
             point.x = float(x_value)
             point.y = float(y_value)
-            point.z = 0.06 if is_best else 0.03
+            point.z = 0.09 if is_best else 0.035
             marker.points.append(point)
         return marker
 

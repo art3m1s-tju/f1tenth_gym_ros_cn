@@ -1,19 +1,67 @@
 #!/usr/bin/env bash
 # One-command Frenet static obstacle validation runner.
 # Usage:
-#   ./run_frenet_test.sh            # launch simulator + RViz
-#   ./run_frenet_test.sh --headless # run unit tests + 25s headless launch
-#   ./run_frenet_test.sh --speed-test # run unit tests + 90s headless launch
+#   ./run_frenet_test.sh                              # launch simulator + RViz
+#   ./run_frenet_test.sh --target-speed 1.0          # set LQR cruise speed
+#   ./run_frenet_test.sh --headless                  # run unit tests + 25s headless launch
+#   ./run_frenet_test.sh --speed-test --target-speed 1.0 # run 90s headless speed test
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${F1TENTH_DOCKER_IMAGE:-f1tenth_gym_ros:latest}"
 CONTAINER_PKG="/sim_ws/src/f1tenth_gym_ros"
-MODE="${1:-rviz}"
+MODE="rviz"
+TARGET_SPEED="${FRENET_TARGET_SPEED:-0.85}"
 
-if [[ "${MODE}" != "rviz" && "${MODE}" != "--rviz" && "${MODE}" != "--headless" && "${MODE}" != "--speed-test" ]]; then
-  echo "Usage: $0 [--rviz|--headless|--speed-test]"
+usage() {
+  cat <<USAGE
+Usage: $0 [--rviz|--headless|--speed-test] [--target-speed MPS]
+
+Options:
+  --target-speed MPS   LQR global cruise speed in m/s. Default: ${TARGET_SPEED}
+  --rviz               Launch simulator with RViz. Default mode.
+  --headless           Run unit tests + 25s headless launch.
+  --speed-test         Run unit tests + 90s headless launch.
+
+Environment:
+  FRENET_TARGET_SPEED  Default target speed if --target-speed is omitted.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    rviz|--rviz|--headless|--speed-test)
+      MODE="$1"
+      shift
+      ;;
+    --target-speed|--targetspeed)
+      if [[ $# -lt 2 ]]; then
+        echo "[ERROR] --target-speed requires a numeric value."
+        usage
+        exit 2
+      fi
+      TARGET_SPEED="$2"
+      shift 2
+      ;;
+    --target-speed=*|--targetspeed=*)
+      TARGET_SPEED="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "[ERROR] Unknown argument: $1"
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if ! [[ "${TARGET_SPEED}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "[ERROR] target speed must be a non-negative number, got: ${TARGET_SPEED}"
   exit 2
 fi
 
@@ -60,7 +108,7 @@ trajectory_mode:=centerline \
 sx:=0.0 \
 sy:=5.0 \
 stheta:=3.1416 \
-target_speed:=0.85 \
+target_speed:=${TARGET_SPEED} \
 min_speed:=0.20 \
 max_lateral_accel:=1.5 \
 max_accel:=1.0 \
@@ -111,6 +159,7 @@ echo " repo:        ${REPO_ROOT}"
 echo " image:       ${IMAGE}"
 echo " rviz:        ${ENABLE_RVIZ}"
 echo " mode:        ${MODE}"
+echo " target_speed: ${TARGET_SPEED} m/s"
 echo "=========================================="
 
 DOCKER_ARGS=(

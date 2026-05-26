@@ -215,7 +215,8 @@ Visualization Manager:
       Enabled: true
       Name: FrenetCandidates
       Namespaces:
-        frenet_candidates: true
+        frenet_best_candidate: true
+        frenet_candidate_set: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
