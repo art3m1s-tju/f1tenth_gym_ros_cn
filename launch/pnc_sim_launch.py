@@ -110,6 +110,7 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_activation_base_lookahead_m', default_value='2.2'),
         DeclareLaunchArgument('frenet_activation_reaction_time_s', default_value='1.0'),
         DeclareLaunchArgument('frenet_activation_decel_mps2', default_value='2.0'),
+        DeclareLaunchArgument('frenet_max_observed_speed_mps', default_value='0.0'),
         DeclareLaunchArgument('frenet_centerline_speed_limit_mps', default_value='-1.0'),
         DeclareLaunchArgument('frenet_avoidance_speed_limit_mps', default_value='0.75'),
         DeclareLaunchArgument('frenet_stop_speed_limit_mps', default_value='0.0'),
@@ -323,6 +324,9 @@ def generate_launch_description():
         frenet_activation_decel = LaunchConfiguration(
             'frenet_activation_decel_mps2'
         ).perform(context)
+        frenet_max_observed_speed = LaunchConfiguration(
+            'frenet_max_observed_speed_mps'
+        ).perform(context)
         frenet_centerline_speed_limit = LaunchConfiguration(
             'frenet_centerline_speed_limit_mps'
         ).perform(context)
@@ -425,6 +429,7 @@ def generate_launch_description():
                 '-p', f'activation_base_lookahead_m:={frenet_activation_base_lookahead}',
                 '-p', f'activation_reaction_time_s:={frenet_activation_reaction_time}',
                 '-p', f'activation_decel_mps2:={frenet_activation_decel}',
+                '-p', f'max_observed_speed_mps:={frenet_max_observed_speed}',
                 '-p', f'centerline_speed_limit_mps:={frenet_centerline_speed_limit}',
                 '-p', f'avoidance_speed_limit_mps:={frenet_avoidance_speed_limit}',
                 '-p', f'stop_speed_limit_mps:={frenet_stop_speed_limit}',

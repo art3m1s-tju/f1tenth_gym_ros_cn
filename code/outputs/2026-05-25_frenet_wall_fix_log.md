@@ -785,3 +785,87 @@ Frenet planning cycle elapsed=0.389s, total=78, safe=17, collision_reject=49, cl
 ```
 
 结论：当前 bounded 测试已经覆盖“静态障碍 + 赛道内外边界”约束，默认 preset 下可完成超过一圈且无碰撞、无 stop path、无速度反向。
+
+## 2026-05-26: 修复高速场景候选束消失和 obstacle 前 emergency stop
+
+### 问题
+
+RViz 中出现“靠近障碍物时看不到 Frenet 候选轨迹束”，同时车辆在障碍物前停顿后再继续走。复核 `lqr_tracking_log.csv` 后确认：
+
+```text
+local_speed_limit=0.0
+v_cmd≈0 持续约 1.5s
+```
+
+这说明不是普通降速，而是 Frenet 发布了 stop path。
+
+### 根因
+
+1. `Holding safe Frenet path` 和 no-candidate fallback 分支会调用：
+
+```text
+publish_debug_markers(stamp, [], None)
+```
+
+这会向 `/frenet/debug/candidates` 发送 `DELETEALL`，把上一轮候选束清空。因此候选轨迹在 RViz 里只短暂闪现，随后被 hold path 逻辑删除。
+
+2. 高速测试中脚本的 LQR `target_speed=3.0m/s`，但 Frenet 几何采样仍固定为：
+
+```text
+frenet_target_speed=1.2
+frenet_v_max=1.8
+frenet_grid_forward_m=10.0
+```
+
+LQR 和 Frenet 几何尺度不一致。
+
+3. Frenet node 使用 odom 位姿差分估计速度。高负载/慢规划时该差分会被异常放大，日志中出现：
+
+```text
+s_dot≈16m/s, speed≈16.7m/s
+```
+
+但 LQR CSV 中实际 `v_actual max=3.0m/s`。错误初始速度污染候选生成，导致后续周期全候选 collision reject 并触发 stop path。
+
+### 修正
+
+- Frenet debug marker 增加上一轮候选缓存：
+  - fresh planning 成功时缓存候选束和 best candidate；
+  - hold path / no-candidate fallback 时保留上一轮候选束，不再清空 RViz marker；
+  - centerline clear 时才清空候选束。
+- `run_frenet_test.sh` 根据 `--target-speed` 自动设置 Frenet 几何采样：
+
+```text
+target=3.0, avoidance=1.2
+=> frenet_geom: target=3.000 v=[0.840, 3.750] grid_forward=20.000m
+```
+
+- Frenet odom 速度估计增加异常过滤：
+  - 当位姿差分速度超过 `max(3.0, 1.5 * cruise_speed + 0.75)` 时，优先回退到 odom twist；
+  - 如果 twist 也异常，则按上限裁剪；
+  - 过滤时打印 warning 便于诊断。
+
+### 高速 bounded 验证
+
+运行：
+
+```text
+./run_frenet_test.sh --speed-test --target-speed 3.0 --avoidance-speed 1.2
+```
+
+结果：
+
+```text
+stop/no-safe/open-loop endpoint count: 0
+ego_collision_count: 0
+filtered_implausible_frenet_speed_count: 5
+duration: 83.40s
+distance: 163.47m
+v_actual mean/p50/p90/max: 1.836 / 1.224 / 2.991 / 3.000 m/s
+v_cmd mean/p50/p90/max: 1.865 / 1.275 / 3.000 / 3.000 m/s
+local_speed_limit min/max: 1.2 / 1.2 m/s
+zero_limit_rows: 0
+negative_v_path_count: 0
+```
+
+结论：`target_speed=3.0m/s`、`avoidance_speed=1.2m/s` 的 bounded 场景下，不再触发 stop path；候选束不再被 hold/no-candidate 分支清空；Frenet 速度估计异常被过滤。

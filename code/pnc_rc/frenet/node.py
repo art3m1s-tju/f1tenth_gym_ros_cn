@@ -104,6 +104,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("activation_base_lookahead_m", 2.2)
         self.declare_parameter("activation_reaction_time_s", 1.0)
         self.declare_parameter("activation_decel_mps2", 2.0)
+        self.declare_parameter("max_observed_speed_mps", 0.0)
         self.declare_parameter("centerline_speed_limit_mps", -1.0)
         self.declare_parameter("avoidance_speed_limit_mps", 0.70)
         self.declare_parameter("stop_speed_limit_mps", 0.0)
@@ -275,6 +276,10 @@ class FrenetStaticObstaclePlanner(Node):
             1e-6,
             float(self.get_parameter("activation_decel_mps2").value),
         )
+        max_observed_speed = float(self.get_parameter("max_observed_speed_mps").value)
+        if max_observed_speed <= 0.0:
+            max_observed_speed = max(3.0, 1.5 * self.cruise_speed_mps + 0.75)
+        self.max_observed_speed_mps = max(0.5, max_observed_speed)
         self.centerline_speed_limit_mps = float(
             self.get_parameter("centerline_speed_limit_mps").value
         )
@@ -296,10 +301,13 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_path_drop_log_time = 0.0
         self.last_mode_log_time = 0.0
         self.last_far_threat_log_time = 0.0
+        self.last_velocity_filter_log_time = 0.0
         self.current_mode = "centerline"
         self.last_published_path_xy: np.ndarray | None = None
         self.last_published_path_time: float | None = None
         self.last_published_path_mode: str | None = None
+        self.last_debug_candidates = []
+        self.last_debug_best_candidate = None
         self.previous_odom_position: np.ndarray | None = None
         self.previous_odom_time: float | None = None
         self.previous_odom_wall_time: float | None = None
@@ -426,7 +434,7 @@ class FrenetStaticObstaclePlanner(Node):
             return
 
         if self._publish_held_path_if_safe(stamp, now, occupancy, vehicle_pose):
-            self.publish_debug_markers(stamp, [], None)
+            self.publish_debug_markers(stamp, [], None, keep_previous=True)
             return
 
         self.current_mode = "frenet"
@@ -452,7 +460,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.last_plan_elapsed_sec = time.perf_counter() - plan_start
             self._log_plan_timing(now, stats, self.last_plan_elapsed_sec)
             if self._reuse_last_candidate_if_fresh(stamp, now, occupancy, vehicle_pose):
-                self.publish_debug_markers(stamp, [], None)
+                self.publish_debug_markers(stamp, [], None, keep_previous=True)
                 return
             self.log_no_candidate(
                 stats,
@@ -462,7 +470,7 @@ class FrenetStaticObstaclePlanner(Node):
                 velocity_xy,
                 scan,
             )
-            self.publish_debug_markers(stamp, [], None)
+            self.publish_debug_markers(stamp, [], None, keep_previous=True)
             self.publish_stop_path(stamp, publish_position, publish_yaw)
             return
         self.last_plan_elapsed_sec = time.perf_counter() - plan_start
@@ -755,7 +763,24 @@ class FrenetStaticObstaclePlanner(Node):
         )
         return polyline_length(remaining)
 
-    def publish_debug_markers(self, stamp, candidates, best_candidate) -> None:
+    def publish_debug_markers(
+        self,
+        stamp,
+        candidates,
+        best_candidate,
+        *,
+        keep_previous: bool = False,
+    ) -> None:
+        if candidates or best_candidate is not None:
+            self.last_debug_candidates = list(candidates)
+            self.last_debug_best_candidate = best_candidate
+        elif keep_previous:
+            candidates = self.last_debug_candidates
+            best_candidate = self.last_debug_best_candidate
+        else:
+            self.last_debug_candidates = []
+            self.last_debug_best_candidate = None
+
         marker_array = MarkerArray()
         marker_array.markers.append(self._delete_all_marker(stamp))
 
@@ -902,6 +927,15 @@ class FrenetStaticObstaclePlanner(Node):
         twist = msg.twist.twist
         position, yaw = self._odom_pose(msg)
         velocity_xy = self.previous_velocity_xy.copy()
+        twist_velocity_xy = np.array(
+            [
+                math.cos(yaw) * float(twist.linear.x)
+                - math.sin(yaw) * float(twist.linear.y),
+                math.sin(yaw) * float(twist.linear.x)
+                + math.cos(yaw) * float(twist.linear.y),
+            ],
+            dtype=float,
+        )
         stamp_sec = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         wall_time = time.monotonic()
         if self.previous_odom_position is not None and self.previous_odom_time is not None:
@@ -914,7 +948,22 @@ class FrenetStaticObstaclePlanner(Node):
                 if 1e-4 <= wall_dt <= 0.5 and np.linalg.norm(displacement) > 1e-5:
                     velocity_xy = displacement / wall_dt
         elif not np.any(velocity_xy):
-            velocity_xy = np.array([twist.linear.x, twist.linear.y], dtype=float)
+            velocity_xy = twist_velocity_xy
+
+        speed = float(np.linalg.norm(velocity_xy))
+        if speed > self.max_observed_speed_mps:
+            twist_speed = float(np.linalg.norm(twist_velocity_xy))
+            if math.isfinite(twist_speed) and twist_speed <= self.max_observed_speed_mps:
+                velocity_xy = twist_velocity_xy
+            elif speed > 1e-9:
+                velocity_xy = velocity_xy * (self.max_observed_speed_mps / speed)
+            if wall_time - self.last_velocity_filter_log_time >= 0.5:
+                self.last_velocity_filter_log_time = wall_time
+                self.get_logger().warning(
+                    "Filtered implausible Frenet odom speed estimate "
+                    f"(raw={speed:.2f}m/s, twist={twist_speed:.2f}m/s, "
+                    f"limit={self.max_observed_speed_mps:.2f}m/s)."
+                )
         self.previous_velocity_xy = velocity_xy.copy()
         self.previous_odom_position = position.copy()
         self.previous_odom_time = stamp_sec

@@ -37,6 +37,12 @@ Environment:
   FRENET_AVOIDANCE_SPEED
                        Default avoidance speed if --avoidance-speed is omitted.
   FRENET_MAP_VARIANT   bounded or open. Default: ${MAP_VARIANT}
+  FRENET_GEOMETRY_TARGET_SPEED
+                       Override Frenet geometric target speed.
+  FRENET_V_MIN / FRENET_V_MAX
+                       Override Frenet longitudinal speed samples.
+  FRENET_GRID_FORWARD_M
+                       Override Frenet local occupancy grid forward range.
 USAGE
 }
 
@@ -115,6 +121,25 @@ case "${MAP_VARIANT}" in
     ;;
 esac
 
+eval "$(
+  python3 - <<PY
+target = float("${TARGET_SPEED}")
+avoidance = float("${AVOIDANCE_SPEED}")
+geom_target = max(1.2, target, avoidance)
+v_min = max(0.6, min(avoidance * 0.7, target * 0.5, geom_target))
+v_max = max(1.8, geom_target * 1.25, avoidance * 1.5)
+grid_forward = max(10.0, target * 6.0 + 2.0)
+print(f'FRENET_GEOMETRY_TARGET_SPEED_DEFAULT="{geom_target:.3f}"')
+print(f'FRENET_V_MIN_DEFAULT="{v_min:.3f}"')
+print(f'FRENET_V_MAX_DEFAULT="{v_max:.3f}"')
+print(f'FRENET_GRID_FORWARD_DEFAULT="{grid_forward:.3f}"')
+PY
+)"
+FRENET_GEOMETRY_TARGET_SPEED="${FRENET_GEOMETRY_TARGET_SPEED:-${FRENET_GEOMETRY_TARGET_SPEED_DEFAULT}}"
+FRENET_V_MIN="${FRENET_V_MIN:-${FRENET_V_MIN_DEFAULT}}"
+FRENET_V_MAX="${FRENET_V_MAX:-${FRENET_V_MAX_DEFAULT}}"
+FRENET_GRID_FORWARD_M="${FRENET_GRID_FORWARD_M:-${FRENET_GRID_FORWARD_DEFAULT}}"
+
 ENABLE_RVIZ="true"
 RUN_PREFIX=""
 RUN_SUFFIX=""
@@ -169,9 +194,9 @@ frenet_reference_closed_loop:=true \
 frenet_centerline_speed_limit_mps:=-1.0 \
 frenet_avoidance_speed_limit_mps:=${AVOIDANCE_SPEED} \
 frenet_stop_speed_limit_mps:=0.0 \
-frenet_target_speed:=1.2 \
-frenet_v_min:=0.8 \
-frenet_v_max:=1.8 \
+frenet_target_speed:=${FRENET_GEOMETRY_TARGET_SPEED} \
+frenet_v_min:=${FRENET_V_MIN} \
+frenet_v_max:=${FRENET_V_MAX} \
 frenet_v_step:=0.6 \
 frenet_t_min:=4.0 \
 frenet_t_max:=6.0 \
@@ -182,7 +207,7 @@ frenet_d_max:=1.8 \
 frenet_d_step:=0.3 \
 frenet_max_heading_jump:=0.85 \
 frenet_grid_inflation_radius_m:=0.18 \
-frenet_grid_forward_m:=10.0 \
+frenet_grid_forward_m:=${FRENET_GRID_FORWARD_M} \
 frenet_grid_half_width_m:=3.2 \
 frenet_max_curvature:=1.1 \
 frenet_corridor_radius_m:=0.16 \
@@ -217,6 +242,7 @@ echo " mode:        ${MODE}"
 echo " map:         ${MAP_VARIANT} (${MAP_NAME})"
 echo " target_speed: ${TARGET_SPEED} m/s"
 echo " avoid_speed: ${AVOIDANCE_SPEED} m/s"
+echo " frenet_geom: target=${FRENET_GEOMETRY_TARGET_SPEED} v=[${FRENET_V_MIN}, ${FRENET_V_MAX}] grid_forward=${FRENET_GRID_FORWARD_M}m"
 echo "=========================================="
 
 DOCKER_ARGS=(
