@@ -1000,3 +1000,73 @@ Selecting temporally consistent Frenet candidate
 ```
 
 结论：这版不会改变碰撞判定，只改变“多个 safe candidate 之间如何选”。它通过时间连续性和同侧保持抑制候选轨迹在相邻横向 offset/左右两侧之间抖动，从源头减少 LQR 蛇形跟踪。
+
+## 2026-05-26 新增：随机障碍鲁棒性批量测试
+
+为评估 Frenet 避障算法对随机障碍位置的鲁棒性，新增批量测试入口：
+
+```text
+./run_frenet_random_obstacle_robustness.sh
+```
+
+默认测试定义：
+
+```text
+trials: 10
+laps_per_trial: 3
+target_speed: 3.0m/s
+avoidance_speed: 1.2m/s
+obstacle_count: 2
+obstacle_size: 0.4m
+seed_start: 0
+timeout_per_trial: 240s
+```
+
+### 实现
+
+- 新增 `code/lqr_sweep/frenet_random_robustness.py`：
+  - 对每个 seed 调用 `generate_static_obstacle_test_map.write_obstacle_map()` 生成随机障碍地图；
+  - 使用同一套高速 Frenet preset 运行 headless ROS 仿真；
+  - 通过车辆 `(x,y)` 投影到全局中心线累计圈数，避免 Frenet 模式下 LQR `closest_idx` 指向局部轨迹导致圈数统计失效；
+  - 解析 launch log 中的 `Ego collision detected`；
+  - 解析 tracking CSV 中的负向速度、长时间 0 限速、低速卡死；
+  - 每轮输出 `tracking.csv`、`launch.log`、地图 `.yaml/.pgm/.json`；
+  - 汇总 `summary.csv` 和 `summary.json`，给出成功率。
+- 新增 `run_frenet_random_obstacle_robustness.sh`：
+  - 在 Docker 内构建 workspace；
+  - 先运行相关 pytest；
+  - 再执行批量鲁棒性测试；
+  - 支持 `--trials`、`--laps`、`--timeout`、`--target-speed`、`--avoidance-speed`、`--obstacle-count`、`--seed-start` 等入口。
+- 新增 `test/test_frenet_random_robustness.py`：
+  - 覆盖高速 preset 计算；
+  - 覆盖基于全局位置投影的圈数统计；
+  - 覆盖 launch/tracking 日志摘要。
+
+### 验证
+
+单元测试：
+
+```text
+python3 -m pytest test/test_frenet_planner.py test/test_frenet_random_robustness.py -q
+33 passed
+```
+
+Docker smoke：
+
+```text
+./run_frenet_random_obstacle_robustness.sh --trials 1 --laps 1 --timeout 100 --batch-name smoke_tmp2
+```
+
+结果：
+
+```text
+Trial seed_000: PASS
+completed_laps: 1/1
+success_rate: 1.000
+```
+
+正式 10 seed / 3 laps 测试命令：
+
+```text
+./run_frenet_random_obstacle_robustness.sh --trials 10 --laps 3 --timeout 240 --target-speed 3.0 --avoidance-speed 1.2
+```
