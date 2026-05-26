@@ -89,6 +89,9 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("max_held_path_age_s", 0.45)
         self.declare_parameter("held_path_replan_clearance_m", 0.22)
         self.declare_parameter("held_path_min_remaining_m", 2.0)
+        self.declare_parameter("candidate_lateral_consistency_weight", 8.0)
+        self.declare_parameter("candidate_side_switch_penalty", 25.0)
+        self.declare_parameter("candidate_side_deadband_m", 0.20)
         self.declare_parameter("projection_search_window_m", 6.0)
         self.declare_parameter("stop_path_length_m", 0.25)
         self.declare_parameter("min_published_path_length_m", 0.75)
@@ -224,6 +227,18 @@ class FrenetStaticObstaclePlanner(Node):
             0.0,
             float(self.get_parameter("held_path_min_remaining_m").value),
         )
+        self.candidate_lateral_consistency_weight = max(
+            0.0,
+            float(self.get_parameter("candidate_lateral_consistency_weight").value),
+        )
+        self.candidate_side_switch_penalty = max(
+            0.0,
+            float(self.get_parameter("candidate_side_switch_penalty").value),
+        )
+        self.candidate_side_deadband_m = max(
+            0.0,
+            float(self.get_parameter("candidate_side_deadband_m").value),
+        )
         self.projection_search_window_m = max(
             0.5,
             float(self.get_parameter("projection_search_window_m").value),
@@ -321,8 +336,10 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_mode_log_time = 0.0
         self.last_far_threat_log_time = 0.0
         self.last_hold_replan_log_time = 0.0
+        self.last_candidate_selection_log_time = 0.0
         self.last_velocity_filter_log_time = 0.0
         self.current_mode = "centerline"
+        self.last_selected_candidate_d_final: float | None = None
         self.last_published_path_xy: np.ndarray | None = None
         self.last_published_path_time: float | None = None
         self.last_published_path_mode: str | None = None
@@ -434,6 +451,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.current_mode = "centerline"
             self.last_safe_candidate_xy = None
             self.last_safe_candidate_time = None
+            self.last_selected_candidate_d_final = None
             self._publish_centerline_path(stamp, position, yaw, state.s)
             self._log_mode(
                 now,
@@ -447,6 +465,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.current_mode = "approach" if approach_mode else "centerline"
             self.last_safe_candidate_xy = None
             self.last_safe_candidate_time = None
+            self.last_selected_candidate_d_final = None
             self._publish_centerline_path(
                 stamp,
                 position,
@@ -505,6 +524,7 @@ class FrenetStaticObstaclePlanner(Node):
             return
         self.last_plan_elapsed_sec = time.perf_counter() - plan_start
         self._log_plan_timing(now, stats, self.last_plan_elapsed_sec)
+        candidate = self._select_consistent_candidate(candidate, debug_candidates, now)
         anchored_candidate = trim_path_to_position(
             candidate.xy,
             publish_position,
@@ -523,6 +543,7 @@ class FrenetStaticObstaclePlanner(Node):
             return
         self.last_safe_candidate_xy = np.asarray(candidate.xy, dtype=float).copy()
         self.last_safe_candidate_time = now
+        self.last_selected_candidate_d_final = float(candidate.d[-1])
         self.publish_debug_markers(stamp, debug_candidates, candidate)
         self.publish_path(stamp, anchored_candidate, mode="avoidance", force=True)
 
@@ -702,6 +723,53 @@ class FrenetStaticObstaclePlanner(Node):
         )
         self.publish_path(stamp, anchored, mode="avoidance")
         return True
+
+    def _select_consistent_candidate(
+        self,
+        best_candidate,
+        safe_candidates,
+        now: float,
+    ):
+        previous_d = self.last_selected_candidate_d_final
+        if (
+            best_candidate is None
+            or previous_d is None
+            or not safe_candidates
+            or (
+                self.candidate_lateral_consistency_weight <= 0.0
+                and self.candidate_side_switch_penalty <= 0.0
+            )
+        ):
+            return best_candidate
+
+        deadband = self.candidate_side_deadband_m
+
+        def adjusted_cost(candidate) -> float:
+            d_final = float(candidate.d[-1])
+            d_jump = d_final - previous_d
+            score = (
+                float(candidate.cost)
+                + self.candidate_lateral_consistency_weight * d_jump * d_jump
+            )
+            if (
+                abs(previous_d) >= deadband
+                and abs(d_final) >= deadband
+                and previous_d * d_final < 0.0
+            ):
+                score += self.candidate_side_switch_penalty
+            return score
+
+        selected = min(safe_candidates, key=adjusted_cost)
+        if selected is not best_candidate and now - self.last_candidate_selection_log_time >= 0.5:
+            self.last_candidate_selection_log_time = now
+            self.get_logger().info(
+                "Selecting temporally consistent Frenet candidate "
+                f"(raw_d={float(best_candidate.d[-1]):.2f}, "
+                f"selected_d={float(selected.d[-1]):.2f}, "
+                f"previous_d={previous_d:.2f}, raw_cost={float(best_candidate.cost):.2f}, "
+                f"selected_cost={float(selected.cost):.2f})."
+            )
+        return selected
 
     def log_no_candidate(
         self,

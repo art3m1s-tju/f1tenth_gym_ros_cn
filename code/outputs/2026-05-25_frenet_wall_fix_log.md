@@ -937,3 +937,66 @@ negative_v_path: 0
 ```
 
 结论：这次“卡住”的直接原因是 stop path/0 限速链路，不是 RViz 假象。修复后高速 bounded 测试中没有再触发 no-candidate stop，也没有第一障碍前长时间停住。
+
+## 2026-05-26 修复：候选轨迹左右跳变导致蛇形
+
+用户在 RViz 中观察到：小车在 Frenet 候选轨迹之间反复左右切换，导致实际跟踪路径出现蛇形。
+
+### 根因
+
+- `plan_frenet_path()` 每一帧只按当前帧 cost 排序候选轨迹。
+- 左右/相邻横向 offset 的候选在障碍附近代价经常很接近。
+- LaserScan、栅格膨胀和车辆位姿轻微变化会让当前帧 best candidate 在相邻 offset 甚至左右两侧之间跳变。
+- LQR 每次追新的局部轨迹，轨迹端点横向跳变就表现为蛇形走位。
+
+### 修正
+
+- Frenet node 增加候选选择滞回：
+  - 记录上一条已发布 Frenet candidate 的 `d[-1]`；
+  - fresh planning 后不直接使用 raw best candidate；
+  - 在所有 safe candidates 中重新打分，加入横向 endpoint 连续性惩罚；
+  - 如果上一帧已经明显在某一侧，切到另一侧会额外增加 side-switch penalty；
+  - 只有另一侧候选的原始代价优势足够大，或者同侧候选不可用时，才允许切边。
+- 新增可调参数：
+  - `candidate_lateral_consistency_weight`
+  - `candidate_side_switch_penalty`
+  - `candidate_side_deadband_m`
+- Launch 暴露对应参数：
+  - `frenet_candidate_lateral_consistency_weight`
+  - `frenet_candidate_side_switch_penalty`
+  - `frenet_candidate_side_deadband_m`
+- `run_frenet_test.sh` 高速 preset 默认使用更强的抗蛇形滞回：
+  - `FRENET_CANDIDATE_CONSISTENCY_WEIGHT=10.0`
+  - `FRENET_CANDIDATE_SIDE_SWITCH_PENALTY=35.0`
+  - `FRENET_CANDIDATE_SIDE_DEADBAND=0.20`
+
+### 验证
+
+运行：
+
+```text
+./run_frenet_test.sh --speed-test --target-speed 3.0 --avoidance-speed 1.2
+```
+
+结果日志：`/tmp/frenet_antizigzag.log`
+
+```text
+pytest: 28 passed
+No safe Frenet candidate count: 0
+stop path / local_speed_limit=0 count: 0
+ego collision count: 0
+negative v_path count: 0
+low-speed stuck runs: 0
+```
+
+日志中可见候选滞回生效，例如：
+
+```text
+Selecting temporally consistent Frenet candidate
+(raw_d=-0.75, selected_d=-0.05, previous_d=-0.05, ...)
+
+Selecting temporally consistent Frenet candidate
+(raw_d=-0.40, selected_d=-1.10, previous_d=-1.10, ...)
+```
+
+结论：这版不会改变碰撞判定，只改变“多个 safe candidate 之间如何选”。它通过时间连续性和同侧保持抑制候选轨迹在相邻横向 offset/左右两侧之间抖动，从源头减少 LQR 蛇形跟踪。

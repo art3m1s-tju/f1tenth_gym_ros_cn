@@ -54,6 +54,8 @@ Environment:
                        Override Frenet local occupancy grid forward range.
   FRENET_D_STEP / FRENET_V_STEP / FRENET_TRAJECTORY_DT
                        Override Frenet candidate sampling density.
+  FRENET_CANDIDATE_CONSISTENCY_WEIGHT / FRENET_CANDIDATE_SIDE_SWITCH_PENALTY
+                       Override anti-snake candidate selection hysteresis.
 USAGE
 }
 
@@ -195,6 +197,9 @@ reuse_timeout = 2.0 if target >= 2.0 else 1.0
 activation_max = max(8.0, 2.5 + target * 2.7)
 activation_reaction = 1.2 if target >= 2.0 else 1.0
 approach_extra = max(1.0, target * target / 4.0)
+candidate_consistency = 10.0 if target >= 2.0 else 8.0
+candidate_side_switch = 35.0 if target >= 2.0 else 25.0
+candidate_deadband = 0.20
 print(f'FRENET_GEOMETRY_TARGET_SPEED_DEFAULT="{geom_target:.3f}"')
 print(f'FRENET_V_MIN_DEFAULT="{v_min:.3f}"')
 print(f'FRENET_V_MAX_DEFAULT="{v_max:.3f}"')
@@ -209,6 +214,9 @@ print(f'FRENET_REUSE_TIMEOUT_DEFAULT="{reuse_timeout:.3f}"')
 print(f'FRENET_ACTIVATION_MAX_DEFAULT="{activation_max:.3f}"')
 print(f'FRENET_ACTIVATION_REACTION_DEFAULT="{activation_reaction:.3f}"')
 print(f'FRENET_APPROACH_EXTRA_DEFAULT="{approach_extra:.3f}"')
+print(f'FRENET_CANDIDATE_CONSISTENCY_DEFAULT="{candidate_consistency:.3f}"')
+print(f'FRENET_CANDIDATE_SIDE_SWITCH_DEFAULT="{candidate_side_switch:.3f}"')
+print(f'FRENET_CANDIDATE_DEADBAND_DEFAULT="{candidate_deadband:.3f}"')
 PY
 )"
 FRENET_GEOMETRY_TARGET_SPEED="${FRENET_GEOMETRY_TARGET_SPEED:-${FRENET_GEOMETRY_TARGET_SPEED_DEFAULT}}"
@@ -225,6 +233,9 @@ FRENET_REUSE_TIMEOUT="${FRENET_REUSE_TIMEOUT:-${FRENET_REUSE_TIMEOUT_DEFAULT}}"
 FRENET_ACTIVATION_MAX="${FRENET_ACTIVATION_MAX:-${FRENET_ACTIVATION_MAX_DEFAULT}}"
 FRENET_ACTIVATION_REACTION="${FRENET_ACTIVATION_REACTION:-${FRENET_ACTIVATION_REACTION_DEFAULT}}"
 FRENET_APPROACH_EXTRA="${FRENET_APPROACH_EXTRA:-${FRENET_APPROACH_EXTRA_DEFAULT}}"
+FRENET_CANDIDATE_CONSISTENCY_WEIGHT="${FRENET_CANDIDATE_CONSISTENCY_WEIGHT:-${FRENET_CANDIDATE_CONSISTENCY_DEFAULT}}"
+FRENET_CANDIDATE_SIDE_SWITCH_PENALTY="${FRENET_CANDIDATE_SIDE_SWITCH_PENALTY:-${FRENET_CANDIDATE_SIDE_SWITCH_DEFAULT}}"
+FRENET_CANDIDATE_SIDE_DEADBAND="${FRENET_CANDIDATE_SIDE_DEADBAND:-${FRENET_CANDIDATE_DEADBAND_DEFAULT}}"
 
 ENABLE_RVIZ="true"
 RUN_PREFIX=""
@@ -319,7 +330,10 @@ frenet_approach_slowdown_extra_m:=${FRENET_APPROACH_EXTRA} \
 frenet_reuse_last_candidate_timeout_s:=${FRENET_REUSE_TIMEOUT} \
 frenet_max_held_path_age_s:=${FRENET_MAX_HOLD_AGE} \
 frenet_held_path_replan_clearance_m:=${FRENET_HOLD_REPLAN_CLEARANCE} \
-frenet_held_path_min_remaining_m:=${FRENET_HOLD_MIN_REMAINING}${RUN_SUFFIX}
+frenet_held_path_min_remaining_m:=${FRENET_HOLD_MIN_REMAINING} \
+frenet_candidate_lateral_consistency_weight:=${FRENET_CANDIDATE_CONSISTENCY_WEIGHT} \
+frenet_candidate_side_switch_penalty:=${FRENET_CANDIDATE_SIDE_SWITCH_PENALTY} \
+frenet_candidate_side_deadband_m:=${FRENET_CANDIDATE_SIDE_DEADBAND}${RUN_SUFFIX}
 EOF
 
 echo "=========================================="
@@ -336,6 +350,7 @@ echo " start_pose: (${START_X}, ${START_Y}, ${START_THETA})"
 echo " frenet_geom: target=${FRENET_GEOMETRY_TARGET_SPEED} v=[${FRENET_V_MIN}, ${FRENET_V_MAX}] v_step=${FRENET_V_STEP} d_step=${FRENET_D_STEP} dt=${FRENET_TRAJECTORY_DT}"
 echo " frenet_grid: forward=${FRENET_GRID_FORWARD_M}m hold_age=${FRENET_MAX_HOLD_AGE}s hold_clearance=${FRENET_HOLD_REPLAN_CLEARANCE}m reuse=${FRENET_REUSE_TIMEOUT}s"
 echo " activation: max=${FRENET_ACTIVATION_MAX}m reaction=${FRENET_ACTIVATION_REACTION}s approach_extra=${FRENET_APPROACH_EXTRA}m"
+echo " candidate_hysteresis: consistency=${FRENET_CANDIDATE_CONSISTENCY_WEIGHT} side_switch=${FRENET_CANDIDATE_SIDE_SWITCH_PENALTY} deadband=${FRENET_CANDIDATE_SIDE_DEADBAND}m"
 echo "=========================================="
 
 DOCKER_ARGS=(

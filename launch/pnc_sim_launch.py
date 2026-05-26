@@ -96,6 +96,9 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_max_held_path_age_s', default_value='0.45'),
         DeclareLaunchArgument('frenet_held_path_replan_clearance_m', default_value='0.22'),
         DeclareLaunchArgument('frenet_held_path_min_remaining_m', default_value='2.0'),
+        DeclareLaunchArgument('frenet_candidate_lateral_consistency_weight', default_value='8.0'),
+        DeclareLaunchArgument('frenet_candidate_side_switch_penalty', default_value='25.0'),
+        DeclareLaunchArgument('frenet_candidate_side_deadband_m', default_value='0.20'),
         DeclareLaunchArgument('frenet_projection_search_window_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_stop_path_length_m', default_value='0.25'),
         DeclareLaunchArgument('frenet_min_published_path_length_m', default_value='0.75'),
@@ -288,6 +291,15 @@ def generate_launch_description():
         frenet_hold_min_remaining = LaunchConfiguration(
             'frenet_held_path_min_remaining_m'
         ).perform(context)
+        frenet_candidate_consistency_weight = LaunchConfiguration(
+            'frenet_candidate_lateral_consistency_weight'
+        ).perform(context)
+        frenet_candidate_side_switch_penalty = LaunchConfiguration(
+            'frenet_candidate_side_switch_penalty'
+        ).perform(context)
+        frenet_candidate_side_deadband = LaunchConfiguration(
+            'frenet_candidate_side_deadband_m'
+        ).perform(context)
         frenet_projection_search_window = LaunchConfiguration(
             'frenet_projection_search_window_m'
         ).perform(context)
@@ -430,6 +442,9 @@ def generate_launch_description():
                 '-p', f'max_held_path_age_s:={frenet_max_hold_age}',
                 '-p', f'held_path_replan_clearance_m:={frenet_hold_replan_clearance}',
                 '-p', f'held_path_min_remaining_m:={frenet_hold_min_remaining}',
+                '-p', f'candidate_lateral_consistency_weight:={frenet_candidate_consistency_weight}',
+                '-p', f'candidate_side_switch_penalty:={frenet_candidate_side_switch_penalty}',
+                '-p', f'candidate_side_deadband_m:={frenet_candidate_side_deadband}',
                 '-p', f'projection_search_window_m:={frenet_projection_search_window}',
                 '-p', f'stop_path_length_m:={frenet_stop_path_length}',
                 '-p', f'min_published_path_length_m:={frenet_min_published_path_length}',
