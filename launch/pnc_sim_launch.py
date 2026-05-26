@@ -93,6 +93,9 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_max_heading_jump', default_value='0.85'),
         DeclareLaunchArgument('frenet_min_progress_step_m', default_value='0.20'),
         DeclareLaunchArgument('frenet_reuse_last_candidate_timeout_s', default_value='1.0'),
+        DeclareLaunchArgument('frenet_max_held_path_age_s', default_value='0.45'),
+        DeclareLaunchArgument('frenet_held_path_replan_clearance_m', default_value='0.22'),
+        DeclareLaunchArgument('frenet_held_path_min_remaining_m', default_value='2.0'),
         DeclareLaunchArgument('frenet_projection_search_window_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_stop_path_length_m', default_value='0.25'),
         DeclareLaunchArgument('frenet_min_published_path_length_m', default_value='0.75'),
@@ -110,6 +113,7 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_activation_base_lookahead_m', default_value='2.2'),
         DeclareLaunchArgument('frenet_activation_reaction_time_s', default_value='1.0'),
         DeclareLaunchArgument('frenet_activation_decel_mps2', default_value='2.0'),
+        DeclareLaunchArgument('frenet_approach_slowdown_extra_m', default_value='-1.0'),
         DeclareLaunchArgument('frenet_max_observed_speed_mps', default_value='0.0'),
         DeclareLaunchArgument('frenet_centerline_speed_limit_mps', default_value='-1.0'),
         DeclareLaunchArgument('frenet_avoidance_speed_limit_mps', default_value='0.75'),
@@ -275,6 +279,15 @@ def generate_launch_description():
         frenet_max_heading_jump = LaunchConfiguration('frenet_max_heading_jump').perform(context)
         frenet_min_progress_step = LaunchConfiguration('frenet_min_progress_step_m').perform(context)
         frenet_reuse_timeout = LaunchConfiguration('frenet_reuse_last_candidate_timeout_s').perform(context)
+        frenet_max_hold_age = LaunchConfiguration(
+            'frenet_max_held_path_age_s'
+        ).perform(context)
+        frenet_hold_replan_clearance = LaunchConfiguration(
+            'frenet_held_path_replan_clearance_m'
+        ).perform(context)
+        frenet_hold_min_remaining = LaunchConfiguration(
+            'frenet_held_path_min_remaining_m'
+        ).perform(context)
         frenet_projection_search_window = LaunchConfiguration(
             'frenet_projection_search_window_m'
         ).perform(context)
@@ -323,6 +336,9 @@ def generate_launch_description():
         ).perform(context)
         frenet_activation_decel = LaunchConfiguration(
             'frenet_activation_decel_mps2'
+        ).perform(context)
+        frenet_approach_slowdown_extra = LaunchConfiguration(
+            'frenet_approach_slowdown_extra_m'
         ).perform(context)
         frenet_max_observed_speed = LaunchConfiguration(
             'frenet_max_observed_speed_mps'
@@ -411,6 +427,9 @@ def generate_launch_description():
                 '-p', f'max_heading_jump:={frenet_max_heading_jump}',
                 '-p', f'min_progress_step_m:={frenet_min_progress_step}',
                 '-p', f'reuse_last_candidate_timeout_s:={frenet_reuse_timeout}',
+                '-p', f'max_held_path_age_s:={frenet_max_hold_age}',
+                '-p', f'held_path_replan_clearance_m:={frenet_hold_replan_clearance}',
+                '-p', f'held_path_min_remaining_m:={frenet_hold_min_remaining}',
                 '-p', f'projection_search_window_m:={frenet_projection_search_window}',
                 '-p', f'stop_path_length_m:={frenet_stop_path_length}',
                 '-p', f'min_published_path_length_m:={frenet_min_published_path_length}',
@@ -429,6 +448,7 @@ def generate_launch_description():
                 '-p', f'activation_base_lookahead_m:={frenet_activation_base_lookahead}',
                 '-p', f'activation_reaction_time_s:={frenet_activation_reaction_time}',
                 '-p', f'activation_decel_mps2:={frenet_activation_decel}',
+                '-p', f'approach_slowdown_extra_m:={frenet_approach_slowdown_extra}',
                 '-p', f'max_observed_speed_mps:={frenet_max_observed_speed}',
                 '-p', f'centerline_speed_limit_mps:={frenet_centerline_speed_limit}',
                 '-p', f'avoidance_speed_limit_mps:={frenet_avoidance_speed_limit}',

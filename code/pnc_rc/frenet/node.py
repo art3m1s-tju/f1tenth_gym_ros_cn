@@ -86,6 +86,9 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("debug_marker_topic", "/frenet/debug/candidates")
         self.declare_parameter("debug_max_safe_candidates", 12)
         self.declare_parameter("reuse_last_candidate_timeout_s", 1.0)
+        self.declare_parameter("max_held_path_age_s", 0.45)
+        self.declare_parameter("held_path_replan_clearance_m", 0.22)
+        self.declare_parameter("held_path_min_remaining_m", 2.0)
         self.declare_parameter("projection_search_window_m", 6.0)
         self.declare_parameter("stop_path_length_m", 0.25)
         self.declare_parameter("min_published_path_length_m", 0.75)
@@ -104,6 +107,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("activation_base_lookahead_m", 2.2)
         self.declare_parameter("activation_reaction_time_s", 1.0)
         self.declare_parameter("activation_decel_mps2", 2.0)
+        self.declare_parameter("approach_slowdown_extra_m", -1.0)
         self.declare_parameter("max_observed_speed_mps", 0.0)
         self.declare_parameter("centerline_speed_limit_mps", -1.0)
         self.declare_parameter("avoidance_speed_limit_mps", 0.70)
@@ -208,6 +212,18 @@ class FrenetStaticObstaclePlanner(Node):
             0.0,
             float(self.get_parameter("reuse_last_candidate_timeout_s").value),
         )
+        self.max_held_path_age_s = max(
+            0.0,
+            float(self.get_parameter("max_held_path_age_s").value),
+        )
+        self.held_path_replan_clearance_m = max(
+            self.planner_config.min_clearance_m,
+            float(self.get_parameter("held_path_replan_clearance_m").value),
+        )
+        self.held_path_min_remaining_m = max(
+            0.0,
+            float(self.get_parameter("held_path_min_remaining_m").value),
+        )
         self.projection_search_window_m = max(
             0.5,
             float(self.get_parameter("projection_search_window_m").value),
@@ -276,6 +292,9 @@ class FrenetStaticObstaclePlanner(Node):
             1e-6,
             float(self.get_parameter("activation_decel_mps2").value),
         )
+        self.approach_slowdown_extra_m = float(
+            self.get_parameter("approach_slowdown_extra_m").value
+        )
         max_observed_speed = float(self.get_parameter("max_observed_speed_mps").value)
         if max_observed_speed <= 0.0:
             max_observed_speed = max(3.0, 1.5 * self.cruise_speed_mps + 0.75)
@@ -301,6 +320,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_path_drop_log_time = 0.0
         self.last_mode_log_time = 0.0
         self.last_far_threat_log_time = 0.0
+        self.last_hold_replan_log_time = 0.0
         self.last_velocity_filter_log_time = 0.0
         self.current_mode = "centerline"
         self.last_published_path_xy: np.ndarray | None = None
@@ -421,15 +441,25 @@ class FrenetStaticObstaclePlanner(Node):
             )
             return
 
+        slowdown_lookahead = self._slowdown_lookahead_m(activation_lookahead)
         if centerline_threat_distance > activation_lookahead:
-            self.current_mode = "centerline"
+            approach_mode = centerline_threat_distance <= slowdown_lookahead
+            self.current_mode = "approach" if approach_mode else "centerline"
             self.last_safe_candidate_xy = None
             self.last_safe_candidate_time = None
-            self._publish_centerline_path(stamp, position, yaw, state.s)
+            self._publish_centerline_path(
+                stamp,
+                position,
+                yaw,
+                state.s,
+                mode=self.current_mode,
+            )
             self._log_far_threat(
                 now,
                 centerline_threat_distance,
                 activation_lookahead,
+                slowdown_lookahead,
+                approach_mode,
             )
             return
 
@@ -561,12 +591,24 @@ class FrenetStaticObstaclePlanner(Node):
             max_lookahead_m=self.activation_max_lookahead_m,
         )
 
+    def _slowdown_lookahead_m(self, activation_lookahead_m: float) -> float:
+        if self.approach_slowdown_extra_m >= 0.0:
+            extra = self.approach_slowdown_extra_m
+        else:
+            extra = max(
+                1.0,
+                self.cruise_speed_mps * self.cruise_speed_mps
+                / (2.0 * self.activation_decel_mps2),
+            )
+        return activation_lookahead_m + extra
+
     def _publish_centerline_path(
         self,
         stamp,
         position: np.ndarray,
         yaw: float,
         start_s: float,
+        mode: str = "centerline",
     ) -> None:
         if self.reference is None:
             self.publish_stop_path(stamp, position, yaw)
@@ -588,7 +630,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.publish_stop_path(stamp, position, yaw)
             return
         self.publish_debug_markers(stamp, [], None)
-        self.publish_path(stamp, anchored, mode="centerline")
+        self.publish_path(stamp, anchored, mode=mode)
 
     def _publish_held_path_if_safe(
         self,
@@ -602,6 +644,13 @@ class FrenetStaticObstaclePlanner(Node):
             or self.last_safe_candidate_time is None
         ):
             return False
+        age = now - self.last_safe_candidate_time
+        if self.max_held_path_age_s > 0.0 and age > self.max_held_path_age_s:
+            self._log_hold_replan(
+                now,
+                f"held path age {age:.2f}s exceeds {self.max_held_path_age_s:.2f}s",
+            )
+            return False
 
         collision, min_clearance = occupancy.query_path(
             self.last_safe_candidate_xy,
@@ -613,6 +662,14 @@ class FrenetStaticObstaclePlanner(Node):
             self.planner_config.path_collision_sample_step_m,
         )
         if collision or min_clearance < self.planner_config.min_clearance_m:
+            return False
+        if min_clearance < self.held_path_replan_clearance_m:
+            self._log_hold_replan(
+                now,
+                "held path clearance "
+                f"{min_clearance:.2f}m below replan threshold "
+                f"{self.held_path_replan_clearance_m:.2f}m",
+            )
             return False
 
         if self.latest_odom is not None:
@@ -627,11 +684,21 @@ class FrenetStaticObstaclePlanner(Node):
         )
         if len(anchored) < 2:
             return False
+        remaining_length = polyline_length(anchored)
+        if remaining_length < self.held_path_min_remaining_m:
+            self._log_hold_replan(
+                now,
+                "held path remaining length "
+                f"{remaining_length:.2f}m below {self.held_path_min_remaining_m:.2f}m",
+            )
+            return False
 
         self.current_mode = "hold"
         self._log_mode(
             now,
-            f"Holding safe Frenet path (clearance={min_clearance:.2f}m).",
+            "Holding safe Frenet path "
+            f"(age={age:.2f}s, clearance={min_clearance:.2f}m, "
+            f"remaining={remaining_length:.2f}m).",
         )
         self.publish_path(stamp, anchored, mode="avoidance")
         return True
@@ -724,6 +791,8 @@ class FrenetStaticObstaclePlanner(Node):
         if mode == "stop":
             return max(0.0, self.stop_speed_limit_mps)
         if mode == "avoidance":
+            return self.avoidance_speed_limit_mps
+        if mode == "approach":
             return self.avoidance_speed_limit_mps
         if mode == "centerline":
             return self.centerline_speed_limit_mps
@@ -998,16 +1067,27 @@ class FrenetStaticObstaclePlanner(Node):
         now: float,
         threat_distance_m: float,
         activation_lookahead_m: float,
+        slowdown_lookahead_m: float,
+        approach_mode: bool,
     ) -> None:
         if now - self.last_far_threat_log_time < 1.0:
             return
         self.last_far_threat_log_time = now
+        action = "pre-slowing on centerline" if approach_mode else "keeping centerline"
         self.get_logger().info(
-            "Centerline threat detected but keeping centerline "
+            "Centerline threat detected; "
+            f"{action} "
             f"(threat_distance={threat_distance_m:.2f}m, "
             f"activation_lookahead={activation_lookahead_m:.2f}m, "
+            f"slowdown_lookahead={slowdown_lookahead_m:.2f}m, "
             f"cruise_speed={self.cruise_speed_mps:.2f}m/s)."
         )
+
+    def _log_hold_replan(self, now: float, reason: str) -> None:
+        if now - self.last_hold_replan_log_time < 0.5:
+            return
+        self.last_hold_replan_log_time = now
+        self.get_logger().info(f"Replanning instead of holding Frenet path ({reason}).")
 
 
 def main(args=None) -> None:

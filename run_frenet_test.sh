@@ -4,6 +4,7 @@
 #   ./run_frenet_test.sh                              # launch simulator + RViz
 #   ./run_frenet_test.sh --target-speed 1.0          # set LQR cruise speed
 #   ./run_frenet_test.sh --avoidance-speed 0.75      # set Frenet local speed cap
+#   ./run_frenet_test.sh --sx 3.0 --sy 5.0           # override initial pose
 #   ./run_frenet_test.sh --open-map                  # use the old free-space map
 #   ./run_frenet_test.sh --headless                  # run unit tests + 25s headless launch
 #   ./run_frenet_test.sh --speed-test --target-speed 1.0 # run 90s headless speed test
@@ -17,15 +18,21 @@ MODE="rviz"
 TARGET_SPEED="${FRENET_TARGET_SPEED:-0.85}"
 AVOIDANCE_SPEED="${FRENET_AVOIDANCE_SPEED:-0.75}"
 MAP_VARIANT="${FRENET_MAP_VARIANT:-bounded}"
+START_X="${FRENET_START_X:-3.0}"
+START_Y="${FRENET_START_Y:-5.0}"
+START_THETA="${FRENET_START_THETA:-3.1416}"
 
 usage() {
   cat <<USAGE
-Usage: $0 [--rviz|--headless|--speed-test] [--target-speed MPS] [--avoidance-speed MPS] [--bounded-map|--open-map]
+Usage: $0 [--rviz|--headless|--speed-test] [--target-speed MPS] [--avoidance-speed MPS] [--sx X] [--sy Y] [--stheta RAD] [--bounded-map|--open-map]
 
 Options:
   --target-speed MPS   LQR global cruise speed in m/s. Default: ${TARGET_SPEED}
   --avoidance-speed MPS
                        Frenet local speed limit while avoiding. Default: ${AVOIDANCE_SPEED}
+  --sx X               Initial vehicle x position. Default: ${START_X}
+  --sy Y               Initial vehicle y position. Default: ${START_Y}
+  --stheta RAD         Initial vehicle heading. Default: ${START_THETA}
   --rviz               Launch simulator with RViz. Default mode.
   --headless           Run unit tests + 25s headless launch.
   --speed-test         Run unit tests + 90s headless launch.
@@ -37,12 +44,16 @@ Environment:
   FRENET_AVOIDANCE_SPEED
                        Default avoidance speed if --avoidance-speed is omitted.
   FRENET_MAP_VARIANT   bounded or open. Default: ${MAP_VARIANT}
+  FRENET_START_X / FRENET_START_Y / FRENET_START_THETA
+                       Override the initial vehicle pose.
   FRENET_GEOMETRY_TARGET_SPEED
                        Override Frenet geometric target speed.
   FRENET_V_MIN / FRENET_V_MAX
                        Override Frenet longitudinal speed samples.
   FRENET_GRID_FORWARD_M
                        Override Frenet local occupancy grid forward range.
+  FRENET_D_STEP / FRENET_V_STEP / FRENET_TRAJECTORY_DT
+                       Override Frenet candidate sampling density.
 USAGE
 }
 
@@ -78,6 +89,45 @@ while [[ $# -gt 0 ]]; do
       AVOIDANCE_SPEED="${1#*=}"
       shift
       ;;
+    --sx)
+      if [[ $# -lt 2 ]]; then
+        echo "[ERROR] --sx requires a numeric value."
+        usage
+        exit 2
+      fi
+      START_X="$2"
+      shift 2
+      ;;
+    --sx=*)
+      START_X="${1#*=}"
+      shift
+      ;;
+    --sy)
+      if [[ $# -lt 2 ]]; then
+        echo "[ERROR] --sy requires a numeric value."
+        usage
+        exit 2
+      fi
+      START_Y="$2"
+      shift 2
+      ;;
+    --sy=*)
+      START_Y="${1#*=}"
+      shift
+      ;;
+    --stheta)
+      if [[ $# -lt 2 ]]; then
+        echo "[ERROR] --stheta requires a numeric value."
+        usage
+        exit 2
+      fi
+      START_THETA="$2"
+      shift 2
+      ;;
+    --stheta=*)
+      START_THETA="${1#*=}"
+      shift
+      ;;
     --bounded-map)
       MAP_VARIANT="bounded"
       shift
@@ -106,6 +156,12 @@ if ! [[ "${AVOIDANCE_SPEED}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "[ERROR] avoidance speed must be a non-negative number, got: ${AVOIDANCE_SPEED}"
   exit 2
 fi
+for pose_value in "${START_X}" "${START_Y}" "${START_THETA}"; do
+  if ! [[ "${pose_value}" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+    echo "[ERROR] pose values must be numeric, got: ${pose_value}"
+    exit 2
+  fi
+done
 case "${MAP_VARIANT}" in
   bounded)
     MAP_NAME="frenet_test_two_blocks"
@@ -129,16 +185,46 @@ geom_target = max(1.2, target, avoidance)
 v_min = max(0.6, min(avoidance * 0.7, target * 0.5, geom_target))
 v_max = max(1.8, geom_target * 1.25, avoidance * 1.5)
 grid_forward = max(10.0, target * 6.0 + 2.0)
+v_step = 0.75 if target >= 2.0 else 0.6
+d_step = 0.35 if target >= 2.0 else 0.3
+trajectory_dt = 0.10 if target >= 2.0 else 0.05
+max_hold_age = 0.80 if target >= 2.0 else 0.45
+hold_clearance = 0.10 if target >= 2.0 else 0.20
+hold_remaining = max(2.0, target * 1.0)
+reuse_timeout = 2.0 if target >= 2.0 else 1.0
+activation_max = max(8.0, 2.5 + target * 2.7)
+activation_reaction = 1.2 if target >= 2.0 else 1.0
+approach_extra = max(1.0, target * target / 4.0)
 print(f'FRENET_GEOMETRY_TARGET_SPEED_DEFAULT="{geom_target:.3f}"')
 print(f'FRENET_V_MIN_DEFAULT="{v_min:.3f}"')
 print(f'FRENET_V_MAX_DEFAULT="{v_max:.3f}"')
 print(f'FRENET_GRID_FORWARD_DEFAULT="{grid_forward:.3f}"')
+print(f'FRENET_V_STEP_DEFAULT="{v_step:.3f}"')
+print(f'FRENET_D_STEP_DEFAULT="{d_step:.3f}"')
+print(f'FRENET_TRAJECTORY_DT_DEFAULT="{trajectory_dt:.3f}"')
+print(f'FRENET_MAX_HOLD_AGE_DEFAULT="{max_hold_age:.3f}"')
+print(f'FRENET_HOLD_REPLAN_CLEARANCE_DEFAULT="{hold_clearance:.3f}"')
+print(f'FRENET_HOLD_MIN_REMAINING_DEFAULT="{hold_remaining:.3f}"')
+print(f'FRENET_REUSE_TIMEOUT_DEFAULT="{reuse_timeout:.3f}"')
+print(f'FRENET_ACTIVATION_MAX_DEFAULT="{activation_max:.3f}"')
+print(f'FRENET_ACTIVATION_REACTION_DEFAULT="{activation_reaction:.3f}"')
+print(f'FRENET_APPROACH_EXTRA_DEFAULT="{approach_extra:.3f}"')
 PY
 )"
 FRENET_GEOMETRY_TARGET_SPEED="${FRENET_GEOMETRY_TARGET_SPEED:-${FRENET_GEOMETRY_TARGET_SPEED_DEFAULT}}"
 FRENET_V_MIN="${FRENET_V_MIN:-${FRENET_V_MIN_DEFAULT}}"
 FRENET_V_MAX="${FRENET_V_MAX:-${FRENET_V_MAX_DEFAULT}}"
 FRENET_GRID_FORWARD_M="${FRENET_GRID_FORWARD_M:-${FRENET_GRID_FORWARD_DEFAULT}}"
+FRENET_V_STEP="${FRENET_V_STEP:-${FRENET_V_STEP_DEFAULT}}"
+FRENET_D_STEP="${FRENET_D_STEP:-${FRENET_D_STEP_DEFAULT}}"
+FRENET_TRAJECTORY_DT="${FRENET_TRAJECTORY_DT:-${FRENET_TRAJECTORY_DT_DEFAULT}}"
+FRENET_MAX_HOLD_AGE="${FRENET_MAX_HOLD_AGE:-${FRENET_MAX_HOLD_AGE_DEFAULT}}"
+FRENET_HOLD_REPLAN_CLEARANCE="${FRENET_HOLD_REPLAN_CLEARANCE:-${FRENET_HOLD_REPLAN_CLEARANCE_DEFAULT}}"
+FRENET_HOLD_MIN_REMAINING="${FRENET_HOLD_MIN_REMAINING:-${FRENET_HOLD_MIN_REMAINING_DEFAULT}}"
+FRENET_REUSE_TIMEOUT="${FRENET_REUSE_TIMEOUT:-${FRENET_REUSE_TIMEOUT_DEFAULT}}"
+FRENET_ACTIVATION_MAX="${FRENET_ACTIVATION_MAX:-${FRENET_ACTIVATION_MAX_DEFAULT}}"
+FRENET_ACTIVATION_REACTION="${FRENET_ACTIVATION_REACTION:-${FRENET_ACTIVATION_REACTION_DEFAULT}}"
+FRENET_APPROACH_EXTRA="${FRENET_APPROACH_EXTRA:-${FRENET_APPROACH_EXTRA_DEFAULT}}"
 
 ENABLE_RVIZ="true"
 RUN_PREFIX=""
@@ -180,9 +266,9 @@ enable_frenet_planner:=true \
 map_path:=${CONTAINER_PKG}/maps/generated_static_obstacles/${MAP_NAME} \
 track_csv:=${CONTAINER_PKG}/code/outputs/generated_tracks/${TRACK_NAME} \
 trajectory_mode:=centerline \
-sx:=0.0 \
-sy:=5.0 \
-stheta:=3.1416 \
+sx:=${START_X} \
+sy:=${START_Y} \
+stheta:=${START_THETA} \
 target_speed:=${TARGET_SPEED} \
 min_speed:=0.20 \
 max_lateral_accel:=1.5 \
@@ -197,14 +283,14 @@ frenet_stop_speed_limit_mps:=0.0 \
 frenet_target_speed:=${FRENET_GEOMETRY_TARGET_SPEED} \
 frenet_v_min:=${FRENET_V_MIN} \
 frenet_v_max:=${FRENET_V_MAX} \
-frenet_v_step:=0.6 \
+frenet_v_step:=${FRENET_V_STEP} \
 frenet_t_min:=4.0 \
 frenet_t_max:=6.0 \
 frenet_t_step:=2.0 \
-frenet_trajectory_dt:=0.05 \
+frenet_trajectory_dt:=${FRENET_TRAJECTORY_DT} \
 frenet_d_min:=-1.8 \
 frenet_d_max:=1.8 \
-frenet_d_step:=0.3 \
+frenet_d_step:=${FRENET_D_STEP} \
 frenet_max_heading_jump:=0.85 \
 frenet_grid_inflation_radius_m:=0.18 \
 frenet_grid_forward_m:=${FRENET_GRID_FORWARD_M} \
@@ -225,11 +311,15 @@ frenet_centerline_return_lookahead_m:=5.0 \
 frenet_centerline_threat_lookahead_m:=8.0 \
 frenet_centerline_threat_corridor_radius_m:=0.22 \
 frenet_activation_min_lookahead_m:=3.0 \
-frenet_activation_max_lookahead_m:=8.0 \
+frenet_activation_max_lookahead_m:=${FRENET_ACTIVATION_MAX} \
 frenet_activation_base_lookahead_m:=2.2 \
-frenet_activation_reaction_time_s:=1.0 \
+frenet_activation_reaction_time_s:=${FRENET_ACTIVATION_REACTION} \
 frenet_activation_decel_mps2:=2.0 \
-frenet_reuse_last_candidate_timeout_s:=1.0${RUN_SUFFIX}
+frenet_approach_slowdown_extra_m:=${FRENET_APPROACH_EXTRA} \
+frenet_reuse_last_candidate_timeout_s:=${FRENET_REUSE_TIMEOUT} \
+frenet_max_held_path_age_s:=${FRENET_MAX_HOLD_AGE} \
+frenet_held_path_replan_clearance_m:=${FRENET_HOLD_REPLAN_CLEARANCE} \
+frenet_held_path_min_remaining_m:=${FRENET_HOLD_MIN_REMAINING}${RUN_SUFFIX}
 EOF
 
 echo "=========================================="
@@ -242,7 +332,10 @@ echo " mode:        ${MODE}"
 echo " map:         ${MAP_VARIANT} (${MAP_NAME})"
 echo " target_speed: ${TARGET_SPEED} m/s"
 echo " avoid_speed: ${AVOIDANCE_SPEED} m/s"
-echo " frenet_geom: target=${FRENET_GEOMETRY_TARGET_SPEED} v=[${FRENET_V_MIN}, ${FRENET_V_MAX}] grid_forward=${FRENET_GRID_FORWARD_M}m"
+echo " start_pose: (${START_X}, ${START_Y}, ${START_THETA})"
+echo " frenet_geom: target=${FRENET_GEOMETRY_TARGET_SPEED} v=[${FRENET_V_MIN}, ${FRENET_V_MAX}] v_step=${FRENET_V_STEP} d_step=${FRENET_D_STEP} dt=${FRENET_TRAJECTORY_DT}"
+echo " frenet_grid: forward=${FRENET_GRID_FORWARD_M}m hold_age=${FRENET_MAX_HOLD_AGE}s hold_clearance=${FRENET_HOLD_REPLAN_CLEARANCE}m reuse=${FRENET_REUSE_TIMEOUT}s"
+echo " activation: max=${FRENET_ACTIVATION_MAX}m reaction=${FRENET_ACTIVATION_REACTION}s approach_extra=${FRENET_APPROACH_EXTRA}m"
 echo "=========================================="
 
 DOCKER_ARGS=(

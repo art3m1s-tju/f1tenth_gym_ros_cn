@@ -869,3 +869,71 @@ negative_v_path_count: 0
 ```
 
 结论：`target_speed=3.0m/s`、`avoidance_speed=1.2m/s` 的 bounded 场景下，不再触发 stop path；候选束不再被 hold/no-candidate 分支清空；Frenet 速度估计异常被过滤。
+
+## 2026-05-26 修复：Frenet 阶段卡住和第一障碍前停顿
+
+用户继续反馈：Frenet 阶段走着走着会卡住，第一圈到第一个障碍物前经常停住。复核后确认这不是单纯 `publish_rate_hz` 设置太低，而是以下链路叠加：
+
+- 高速下进入 Frenet 前仍按全局 `target_speed=3.0m/s` 行驶，只有 Frenet 正式发布 avoidance path 后才下发 `1.2m/s` 局部限速，预减速太晚。
+- 单次规划耗时在高负载时可达 `0.5s+`，车在规划期间继续前进。
+- `_publish_held_path_if_safe()` 原先没有年龄限制，只要旧轨迹仍判定安全就会一直 hold，不会重新规划。
+- 第一版 hold 修复过于激进，低 clearance 时频繁丢弃仍可用的 held path，反而制造 no-candidate 窗口。
+- 一旦 no-candidate fallback 发布 stop path，LQR 会收到 3 点短路径和 `local_speed_limit=0.0`，出现 RViz 里看到的“障碍物前停一下/卡住”。
+
+### 代码修改
+
+- Frenet node 新增 approach 预减速模式：
+  - 中心线前方有障碍但尚未进入 Frenet activation 时，如果威胁距离进入 slowdown lookahead，就继续发布中心线路径但使用 `avoidance_speed_limit_mps` 限速；
+  - 日志打印 `pre-slowing on centerline`，明确区分“保持中心线”和“预减速中心线”。
+- Frenet node 新增 held path 重规划约束：
+  - `max_held_path_age_s`
+  - `held_path_replan_clearance_m`
+  - `held_path_min_remaining_m`
+- Launch 暴露新增参数：
+  - `frenet_approach_slowdown_extra_m`
+  - `frenet_max_held_path_age_s`
+  - `frenet_held_path_replan_clearance_m`
+  - `frenet_held_path_min_remaining_m`
+- `run_frenet_test.sh` 默认起点从 `(0.0, 5.0)` 后移到 `(3.0, 5.0)`，让高速测试到第一个障碍前有更合理的加速/减速距离。
+- `run_frenet_test.sh` 新增 `--sx/--sy/--stheta` 起点入口。
+- `run_frenet_test.sh` 高速 preset 调整：
+  - `frenet_trajectory_dt=0.10`
+  - `frenet_max_held_path_age_s=0.80`
+  - `frenet_held_path_replan_clearance_m=0.10`
+  - `frenet_reuse_last_candidate_timeout_s=2.0`
+  - `frenet_activation_max_lookahead_m` 随 `target_speed` 增大
+  - `frenet_activation_reaction_time_s=1.2`
+  - `frenet_approach_slowdown_extra_m=max(1.0, target_speed^2 / 4.0)`
+
+### 验证
+
+运行：
+
+```text
+./run_frenet_test.sh --speed-test --target-speed 3.0 --avoidance-speed 1.2
+```
+
+结果日志：`/tmp/frenet_stall_fix2.log`
+
+```text
+pytest: 28 passed
+No safe Frenet candidate count: 0
+stop path / local_speed_limit=0 count: 0
+ego collision count: 0
+negative v_path count: 0
+low-speed stuck runs: 0
+planning elapsed: about 0.27-0.50s in avoidance cycles
+```
+
+CSV 摘要：
+
+```text
+rows: 8700
+v_actual: 0.0 .. 3.0 m/s
+v_cmd: 0.0 .. 3.0 m/s
+local_speed_limit zero runs: 0
+low speed stuck runs: 0
+negative_v_path: 0
+```
+
+结论：这次“卡住”的直接原因是 stop path/0 限速链路，不是 RViz 假象。修复后高速 bounded 测试中没有再触发 no-candidate stop，也没有第一障碍前长时间停住。
