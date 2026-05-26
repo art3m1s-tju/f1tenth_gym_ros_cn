@@ -29,6 +29,7 @@ from pnc_rc.frenet.planner import (
     plan_frenet_path,
     polyline_length,
     sample_reference_segment,
+    speed_based_activation_lookahead,
     trim_path_to_position,
 )
 
@@ -97,6 +98,12 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("centerline_threat_corridor_radius_m", 0.32)
         self.declare_parameter("centerline_threat_lookahead_m", 6.0)
         self.declare_parameter("reference_closed_loop", True)
+        self.declare_parameter("cruise_speed_mps", 1.0)
+        self.declare_parameter("activation_min_lookahead_m", 3.0)
+        self.declare_parameter("activation_max_lookahead_m", 8.0)
+        self.declare_parameter("activation_base_lookahead_m", 2.2)
+        self.declare_parameter("activation_reaction_time_s", 1.0)
+        self.declare_parameter("activation_decel_mps2", 2.0)
         self.declare_parameter("centerline_speed_limit_mps", -1.0)
         self.declare_parameter("avoidance_speed_limit_mps", 0.70)
         self.declare_parameter("stop_speed_limit_mps", 0.0)
@@ -244,6 +251,30 @@ class FrenetStaticObstaclePlanner(Node):
             0.5,
             float(self.get_parameter("centerline_threat_lookahead_m").value),
         )
+        self.cruise_speed_mps = max(
+            0.0,
+            float(self.get_parameter("cruise_speed_mps").value),
+        )
+        self.activation_min_lookahead_m = max(
+            0.0,
+            float(self.get_parameter("activation_min_lookahead_m").value),
+        )
+        self.activation_max_lookahead_m = max(
+            self.activation_min_lookahead_m,
+            float(self.get_parameter("activation_max_lookahead_m").value),
+        )
+        self.activation_base_lookahead_m = max(
+            0.0,
+            float(self.get_parameter("activation_base_lookahead_m").value),
+        )
+        self.activation_reaction_time_s = max(
+            0.0,
+            float(self.get_parameter("activation_reaction_time_s").value),
+        )
+        self.activation_decel_mps2 = max(
+            1e-6,
+            float(self.get_parameter("activation_decel_mps2").value),
+        )
         self.centerline_speed_limit_mps = float(
             self.get_parameter("centerline_speed_limit_mps").value
         )
@@ -264,6 +295,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_plan_timing_log_time = 0.0
         self.last_path_drop_log_time = 0.0
         self.last_mode_log_time = 0.0
+        self.last_far_threat_log_time = 0.0
         self.current_mode = "centerline"
         self.last_published_path_xy: np.ndarray | None = None
         self.last_published_path_time: float | None = None
@@ -359,12 +391,18 @@ class FrenetStaticObstaclePlanner(Node):
             self.grid_config,
             static_occupied=static_occupancy,
         )
-        centerline_threat = self._centerline_has_obstacle(
+        activation_lookahead = self._activation_lookahead_m()
+        threat_lookahead = max(
+            self.centerline_threat_lookahead_m,
+            activation_lookahead,
+        )
+        centerline_threat_distance = self._centerline_threat_distance(
             occupancy,
             vehicle_pose,
             state.s,
+            threat_lookahead,
         )
-        if not centerline_threat:
+        if centerline_threat_distance is None:
             self.current_mode = "centerline"
             self.last_safe_candidate_xy = None
             self.last_safe_candidate_time = None
@@ -372,6 +410,18 @@ class FrenetStaticObstaclePlanner(Node):
             self._log_mode(
                 now,
                 "Publishing centerline return path; no obstacle threat ahead.",
+            )
+            return
+
+        if centerline_threat_distance > activation_lookahead:
+            self.current_mode = "centerline"
+            self.last_safe_candidate_xy = None
+            self.last_safe_candidate_time = None
+            self._publish_centerline_path(stamp, position, yaw, state.s)
+            self._log_far_threat(
+                now,
+                centerline_threat_distance,
+                activation_lookahead,
             )
             return
 
@@ -438,18 +488,19 @@ class FrenetStaticObstaclePlanner(Node):
         self.publish_debug_markers(stamp, debug_candidates, candidate)
         self.publish_path(stamp, anchored_candidate, mode="avoidance", force=True)
 
-    def _centerline_has_obstacle(
+    def _centerline_threat_distance(
         self,
         occupancy,
         vehicle_pose: tuple[float, float, float],
         start_s: float,
-    ) -> bool:
+        lookahead_m: float,
+    ) -> float | None:
         if self.reference is None:
-            return True
+            return 0.0
         centerline = sample_reference_segment(
             self.reference,
             start_s,
-            self.centerline_threat_lookahead_m,
+            lookahead_m,
             self.centerline_return_step_m,
             d=0.0,
         )
@@ -462,7 +513,45 @@ class FrenetStaticObstaclePlanner(Node):
             self.planner_config.footprint_rear_m,
             self.planner_config.path_collision_sample_step_m,
         )
-        return collision or min_clearance < self.planner_config.min_clearance_m
+        if not collision and min_clearance >= self.planner_config.min_clearance_m:
+            return None
+
+        if len(centerline) < 2:
+            return 0.0
+        cumulative = np.concatenate(
+            [
+                np.array([0.0], dtype=float),
+                np.cumsum(np.linalg.norm(np.diff(centerline, axis=0), axis=1)),
+            ]
+        )
+        stride = max(1, int(math.ceil(0.25 / self.centerline_return_step_m)))
+        for end_idx in range(1, len(centerline), stride):
+            prefix = centerline[: end_idx + 1]
+            prefix_collision, prefix_clearance = occupancy.query_path(
+                prefix,
+                vehicle_pose,
+                self.centerline_threat_corridor_radius_m,
+                self.planner_config.corridor_sample_step_m,
+                self.planner_config.footprint_front_m,
+                self.planner_config.footprint_rear_m,
+                self.planner_config.path_collision_sample_step_m,
+            )
+            if (
+                prefix_collision
+                or prefix_clearance < self.planner_config.min_clearance_m
+            ):
+                return float(cumulative[end_idx])
+        return float(cumulative[-1])
+
+    def _activation_lookahead_m(self) -> float:
+        return speed_based_activation_lookahead(
+            self.cruise_speed_mps,
+            base_lookahead_m=self.activation_base_lookahead_m,
+            reaction_time_s=self.activation_reaction_time_s,
+            decel_mps2=self.activation_decel_mps2,
+            min_lookahead_m=self.activation_min_lookahead_m,
+            max_lookahead_m=self.activation_max_lookahead_m,
+        )
 
     def _publish_centerline_path(
         self,
@@ -854,6 +943,22 @@ class FrenetStaticObstaclePlanner(Node):
             return
         self.last_mode_log_time = now
         self.get_logger().info(message)
+
+    def _log_far_threat(
+        self,
+        now: float,
+        threat_distance_m: float,
+        activation_lookahead_m: float,
+    ) -> None:
+        if now - self.last_far_threat_log_time < 1.0:
+            return
+        self.last_far_threat_log_time = now
+        self.get_logger().info(
+            "Centerline threat detected but keeping centerline "
+            f"(threat_distance={threat_distance_m:.2f}m, "
+            f"activation_lookahead={activation_lookahead_m:.2f}m, "
+            f"cruise_speed={self.cruise_speed_mps:.2f}m/s)."
+        )
 
 
 def main(args=None) -> None:

@@ -601,3 +601,79 @@ negative_v_path_count: 0
 ```
 
 结论：`0.75m/s` 作为当前测试地图的默认避障限速比 `0.65m/s` 更合适，速度提升明显，未复现停车、碰撞或反向速度。
+
+## 2026-05-26: 按巡航速度动态决定 Frenet 接管距离
+
+### 问题
+
+原逻辑中 `frenet_centerline_threat_lookahead_m=8.0` 同时承担两个语义：
+
+- 前方多远开始认为 centerline 有 obstacle threat；
+- 前方多远开始切到 Frenet avoidance 并发布局部限速。
+
+这导致低速下也会在障碍物很远时提前降速，表现为“还没靠近障碍就进入 Frenet / 跟线变差”。
+
+### 修正
+
+保留远距离 centerline threat 感知，但新增速度相关的真正接管距离：
+
+```text
+activation = base + v * reaction_time + v^2 / (2 * decel)
+activation = clamp(activation, min_lookahead, max_lookahead)
+```
+
+当前默认参数：
+
+```text
+base = 2.2m
+reaction_time = 1.0s
+decel = 2.0m/s^2
+min_lookahead = 3.0m
+max_lookahead = 8.0m
+```
+
+对应接管距离大致为：
+
+```text
+0.5m/s -> 3.00m
+0.85m/s -> 3.23m
+1.5m/s -> 4.26m
+2.0m/s -> 5.20m
+3.0m/s -> 7.45m
+```
+
+也就是说：
+
+- 低速只做近距离接管，不再 8m 外就降速；
+- 高速会自然提前切 Frenet，因为需要更多反应和制动距离；
+- `centerline_threat_lookahead_m` 仍用于远距离感知，但 threat 距离大于 activation 时保持 centerline 并清除局部限速。
+
+### 验证结果
+
+使用默认 `target_speed=0.85m/s`、`avoidance_speed=0.75m/s`：
+
+```text
+./run_frenet_test.sh --speed-test
+```
+
+结果：
+
+```text
+stop/no-safe/open-loop endpoint count: 0
+ego_collision_count: 0
+far_threat_keep_centerline_count: 16
+duration: 83.50s
+distance: 68.10m
+v_actual mean/p50/p90/max: 0.802 / 0.850 / 0.850 / 0.850 m/s
+v_cmd mean/p50/p90/max: 0.809 / 0.850 / 0.850 / 0.850 m/s
+negative_v_path_count: 0
+```
+
+日志中可见：
+
+```text
+threat_distance=5.20m, activation_lookahead=3.23m, cruise_speed=0.85m/s -> keep centerline
+threat_distance=3.28m, activation_lookahead=3.23m, cruise_speed=0.85m/s -> still keep centerline
+```
+
+结论：低速场景下不再远距离提前降速，同时当前测试地图仍能稳定避障并覆盖超过一圈。

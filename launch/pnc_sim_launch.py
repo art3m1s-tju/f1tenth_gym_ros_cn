@@ -105,12 +105,17 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_centerline_threat_corridor_radius_m', default_value='0.32'),
         DeclareLaunchArgument('frenet_centerline_threat_lookahead_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_reference_closed_loop', default_value='true'),
+        DeclareLaunchArgument('frenet_activation_min_lookahead_m', default_value='3.0'),
+        DeclareLaunchArgument('frenet_activation_max_lookahead_m', default_value='8.0'),
+        DeclareLaunchArgument('frenet_activation_base_lookahead_m', default_value='2.2'),
+        DeclareLaunchArgument('frenet_activation_reaction_time_s', default_value='1.0'),
+        DeclareLaunchArgument('frenet_activation_decel_mps2', default_value='2.0'),
         DeclareLaunchArgument('frenet_centerline_speed_limit_mps', default_value='-1.0'),
         DeclareLaunchArgument('frenet_avoidance_speed_limit_mps', default_value='0.75'),
         DeclareLaunchArgument('frenet_stop_speed_limit_mps', default_value='0.0'),
         DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
         DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
-        DeclareLaunchArgument('frenet_grid_forward_m', default_value='7.0'),
+        DeclareLaunchArgument('frenet_grid_forward_m', default_value='10.0'),
         DeclareLaunchArgument('frenet_grid_rear_m', default_value='1.0'),
         DeclareLaunchArgument('frenet_grid_half_width_m', default_value='3.0'),
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
@@ -303,6 +308,21 @@ def generate_launch_description():
         frenet_reference_closed_loop = LaunchConfiguration(
             'frenet_reference_closed_loop'
         ).perform(context)
+        frenet_activation_min_lookahead = LaunchConfiguration(
+            'frenet_activation_min_lookahead_m'
+        ).perform(context)
+        frenet_activation_max_lookahead = LaunchConfiguration(
+            'frenet_activation_max_lookahead_m'
+        ).perform(context)
+        frenet_activation_base_lookahead = LaunchConfiguration(
+            'frenet_activation_base_lookahead_m'
+        ).perform(context)
+        frenet_activation_reaction_time = LaunchConfiguration(
+            'frenet_activation_reaction_time_s'
+        ).perform(context)
+        frenet_activation_decel = LaunchConfiguration(
+            'frenet_activation_decel_mps2'
+        ).perform(context)
         frenet_centerline_speed_limit = LaunchConfiguration(
             'frenet_centerline_speed_limit_mps'
         ).perform(context)
@@ -399,6 +419,12 @@ def generate_launch_description():
                 '-p', f'centerline_threat_corridor_radius_m:={frenet_centerline_threat_corridor_radius}',
                 '-p', f'centerline_threat_lookahead_m:={frenet_centerline_threat_lookahead}',
                 '-p', f'reference_closed_loop:={frenet_reference_closed_loop}',
+                '-p', f'cruise_speed_mps:={target_speed}',
+                '-p', f'activation_min_lookahead_m:={frenet_activation_min_lookahead}',
+                '-p', f'activation_max_lookahead_m:={frenet_activation_max_lookahead}',
+                '-p', f'activation_base_lookahead_m:={frenet_activation_base_lookahead}',
+                '-p', f'activation_reaction_time_s:={frenet_activation_reaction_time}',
+                '-p', f'activation_decel_mps2:={frenet_activation_decel}',
                 '-p', f'centerline_speed_limit_mps:={frenet_centerline_speed_limit}',
                 '-p', f'avoidance_speed_limit_mps:={frenet_avoidance_speed_limit}',
                 '-p', f'stop_speed_limit_mps:={frenet_stop_speed_limit}',

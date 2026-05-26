@@ -23,6 +23,7 @@ from pnc_rc.frenet.planner import (
     sample_reference_segment,
     solve_quartic_longitudinal,
     solve_quintic_lateral,
+    speed_based_activation_lookahead,
     swept_corridor_points,
     trim_path_to_position,
     _forward_progress_planning_state,
@@ -84,6 +85,24 @@ def test_forward_progress_planning_state_filters_noisy_acceleration():
 
     assert _forward_progress_planning_state(noisy_accel).s_ddot == 0.0
     assert _forward_progress_planning_state(noisy_brake).s_ddot == 0.0
+
+
+def test_speed_based_activation_lookahead_scales_with_speed():
+    kwargs = dict(
+        base_lookahead_m=2.2,
+        reaction_time_s=1.0,
+        decel_mps2=2.0,
+        min_lookahead_m=3.0,
+        max_lookahead_m=8.0,
+    )
+
+    low = speed_based_activation_lookahead(0.5, **kwargs)
+    medium = speed_based_activation_lookahead(1.5, **kwargs)
+    high = speed_based_activation_lookahead(3.0, **kwargs)
+
+    assert np.isclose(low, 3.0)
+    assert low < medium < high
+    assert 7.0 < high < 8.0
 
 
 def test_reference_path_projection_and_sampling_round_trip():

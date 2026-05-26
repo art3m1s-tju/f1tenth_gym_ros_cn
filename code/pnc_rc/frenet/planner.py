@@ -860,6 +860,26 @@ def polyline_length(points: np.ndarray) -> float:
     return float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
 
 
+def speed_based_activation_lookahead(
+    speed_mps: float,
+    *,
+    base_lookahead_m: float,
+    reaction_time_s: float,
+    decel_mps2: float,
+    min_lookahead_m: float,
+    max_lookahead_m: float,
+) -> float:
+    """Compute a speed-dependent Frenet activation distance."""
+    speed = max(0.0, float(speed_mps))
+    base = max(0.0, float(base_lookahead_m))
+    reaction = max(0.0, float(reaction_time_s))
+    decel = max(1e-6, float(decel_mps2))
+    lower = max(0.0, float(min_lookahead_m))
+    upper = max(lower, float(max_lookahead_m))
+    raw = base + speed * reaction + speed * speed / (2.0 * decel)
+    return float(np.clip(raw, lower, upper))
+
+
 def estimate_path_headings(points: np.ndarray) -> np.ndarray:
     points = np.asarray(points, dtype=float)
     if len(points) < 2:

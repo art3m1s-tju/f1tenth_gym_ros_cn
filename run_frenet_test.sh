@@ -172,6 +172,11 @@ frenet_path_republish_min_remaining_m:=2.0 \
 frenet_centerline_return_lookahead_m:=5.0 \
 frenet_centerline_threat_lookahead_m:=8.0 \
 frenet_centerline_threat_corridor_radius_m:=0.22 \
+frenet_activation_min_lookahead_m:=3.0 \
+frenet_activation_max_lookahead_m:=8.0 \
+frenet_activation_base_lookahead_m:=2.2 \
+frenet_activation_reaction_time_s:=1.0 \
+frenet_activation_decel_mps2:=2.0 \
 frenet_reuse_last_candidate_timeout_s:=1.0${RUN_SUFFIX}
 EOF
 
