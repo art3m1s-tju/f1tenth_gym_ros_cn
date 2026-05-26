@@ -20,6 +20,7 @@ from pnc_rc.frenet.planner import (
     evaluate_quintic,
     initial_frenet_state,
     plan_frenet_path,
+    sample_reference_segment,
     solve_quartic_longitudinal,
     solve_quintic_lateral,
     swept_corridor_points,
@@ -309,6 +310,42 @@ def test_planner_allows_stationary_start_when_total_progress_is_sufficient():
     assert candidate.s[-1] - candidate.s[0] > 0.2
 
 
+def test_planner_ignores_negative_acceleration_seed_for_forward_progress():
+    points = np.column_stack([np.linspace(0.0, 20.0, 80), np.zeros(80)])
+    points = np.vstack([points, [[20.0, 8.0], [0.0, 8.0]]])
+    reference = ReferencePath.from_points(points)
+    state = FrenetState(s=0.6, d=0.0, s_dot=0.46, d_dot=0.0, s_ddot=-4.0, d_ddot=0.0)
+    grid = build_occupancy_grid(
+        np.array([], dtype=float),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=LocalGridConfig(),
+    )
+    config = FrenetPlannerConfig(
+        d_min=0.0,
+        d_max=0.0,
+        d_step=1.0,
+        t_min=4.0,
+        t_max=4.0,
+        t_step=1.0,
+        v_min=0.8,
+        v_max=0.8,
+        v_step=1.0,
+        target_speed=0.8,
+        trajectory_dt=0.05,
+        min_progress_step_m=0.2,
+    )
+    stats = FrenetPlanStats()
+
+    candidate = plan_frenet_path(reference, state, grid, (0.0, 0.0, 0.0), config, stats)
+
+    assert candidate is not None
+    assert stats.progress_rejections == 0
+    assert np.all(np.diff(candidate.s) >= -1e-9)
+
+
 def test_planner_accepts_curved_reference_from_stationary_start():
     theta = np.linspace(0.0, 2.0 * math.pi, 120, endpoint=False)
     points = np.column_stack([5.0 * np.cos(theta), 5.0 * np.sin(theta)])
@@ -431,6 +468,32 @@ def test_trim_path_to_position_reanchors_from_current_pose():
     assert np.isclose(trimmed[0, 0], 1.25, atol=1e-6)
     assert np.isclose(trimmed[0, 1], 0.0, atol=1e-6)
     assert trimmed[1, 0] >= 1.0
+
+
+def test_trim_path_to_position_can_advance_anchor_ahead_of_vehicle():
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], dtype=float)
+
+    trimmed = trim_path_to_position(
+        points,
+        np.array([0.25, 0.0]),
+        min_remaining_length_m=0.5,
+        anchor_lookahead_m=1.0,
+    )
+
+    assert len(trimmed) >= 2
+    assert np.isclose(trimmed[0, 0], 1.25, atol=1e-6)
+    assert np.isclose(trimmed[0, 1], 0.0, atol=1e-6)
+
+
+def test_sample_reference_segment_returns_centerline_ahead():
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], dtype=float)
+    reference = ReferencePath.from_points(points, closed_loop=False)
+
+    segment = sample_reference_segment(reference, start_s=0.5, length_m=1.0, step_m=0.25)
+
+    assert np.allclose(segment[0], [0.5, 0.0])
+    assert np.allclose(segment[-1], [1.5, 0.0])
+    assert len(segment) == 5
 
 
 def test_occupancy_grid_corridor_detects_vehicle_width_collision():

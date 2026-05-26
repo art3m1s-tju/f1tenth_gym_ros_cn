@@ -85,7 +85,11 @@ frenet_footprint_front_m:=0.45 \
 frenet_footprint_rear_m:=0.05 \
 frenet_safe_clearance_m:=0.60 \
 frenet_min_clearance_m:=0.15 \
-frenet_reuse_last_candidate_timeout_s:=0.0${RUN_SUFFIX}
+frenet_published_path_lookahead_m:=0.25 \
+frenet_centerline_return_lookahead_m:=5.0 \
+frenet_centerline_threat_lookahead_m:=6.0 \
+frenet_centerline_threat_corridor_radius_m:=0.32 \
+frenet_reuse_last_candidate_timeout_s:=1.0${RUN_SUFFIX}
 EOF
 
 echo "=========================================="

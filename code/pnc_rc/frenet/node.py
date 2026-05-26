@@ -26,6 +26,7 @@ from pnc_rc.frenet.planner import (
     initial_frenet_state,
     local_static_map_occupancy,
     plan_frenet_path,
+    sample_reference_segment,
     trim_path_to_position,
 )
 
@@ -84,6 +85,11 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("projection_search_window_m", 6.0)
         self.declare_parameter("stop_path_length_m", 0.25)
         self.declare_parameter("min_published_path_length_m", 0.75)
+        self.declare_parameter("published_path_lookahead_m", 0.25)
+        self.declare_parameter("centerline_return_lookahead_m", 5.0)
+        self.declare_parameter("centerline_return_step_m", 0.08)
+        self.declare_parameter("centerline_threat_corridor_radius_m", 0.32)
+        self.declare_parameter("centerline_threat_lookahead_m", 6.0)
         self.declare_parameter("reference_closed_loop", True)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
@@ -192,6 +198,26 @@ class FrenetStaticObstaclePlanner(Node):
             0.0,
             float(self.get_parameter("min_published_path_length_m").value),
         )
+        self.published_path_lookahead_m = max(
+            0.0,
+            float(self.get_parameter("published_path_lookahead_m").value),
+        )
+        self.centerline_return_lookahead_m = max(
+            0.5,
+            float(self.get_parameter("centerline_return_lookahead_m").value),
+        )
+        self.centerline_return_step_m = max(
+            0.02,
+            float(self.get_parameter("centerline_return_step_m").value),
+        )
+        self.centerline_threat_corridor_radius_m = max(
+            0.0,
+            float(self.get_parameter("centerline_threat_corridor_radius_m").value),
+        )
+        self.centerline_threat_lookahead_m = max(
+            0.5,
+            float(self.get_parameter("centerline_threat_lookahead_m").value),
+        )
         publish_rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
         self.timer = self.create_timer(1.0 / publish_rate, self.plan_once)
         self.last_safe_candidate_xy: np.ndarray | None = None
@@ -202,6 +228,8 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_plan_elapsed_sec = 0.0
         self.last_plan_timing_log_time = 0.0
         self.last_path_drop_log_time = 0.0
+        self.last_mode_log_time = 0.0
+        self.current_mode = "centerline"
         self.previous_odom_position: np.ndarray | None = None
         self.previous_odom_time: float | None = None
         self.previous_odom_wall_time: float | None = None
@@ -292,6 +320,27 @@ class FrenetStaticObstaclePlanner(Node):
             self.grid_config,
             static_occupied=static_occupancy,
         )
+        centerline_threat = self._centerline_has_obstacle(
+            occupancy,
+            vehicle_pose,
+            state.s,
+        )
+        if not centerline_threat:
+            self.current_mode = "centerline"
+            self.last_safe_candidate_xy = None
+            self.last_safe_candidate_time = None
+            self._publish_centerline_path(stamp, position, yaw, state.s)
+            self._log_mode(
+                now,
+                "Publishing centerline return path; no obstacle threat ahead.",
+            )
+            return
+
+        if self._publish_held_path_if_safe(stamp, now, occupancy, vehicle_pose):
+            self.publish_debug_markers(stamp, [], None)
+            return
+
+        self.current_mode = "frenet"
         stats = FrenetPlanStats()
         debug_candidates = []
         candidate = plan_frenet_path(
@@ -333,6 +382,7 @@ class FrenetStaticObstaclePlanner(Node):
             candidate.xy,
             publish_position,
             self.min_published_path_length_m,
+            self.published_path_lookahead_m,
         )
         if len(anchored_candidate) < 2:
             if now - self.last_path_drop_log_time >= 0.5:
@@ -348,6 +398,107 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_safe_candidate_time = now
         self.publish_debug_markers(stamp, debug_candidates, candidate)
         self.publish_path(stamp, anchored_candidate)
+
+    def _centerline_has_obstacle(
+        self,
+        occupancy,
+        vehicle_pose: tuple[float, float, float],
+        start_s: float,
+    ) -> bool:
+        if self.reference is None:
+            return True
+        centerline = sample_reference_segment(
+            self.reference,
+            start_s,
+            self.centerline_threat_lookahead_m,
+            self.centerline_return_step_m,
+            d=0.0,
+        )
+        collision, min_clearance = occupancy.query_path(
+            centerline,
+            vehicle_pose,
+            self.centerline_threat_corridor_radius_m,
+            self.planner_config.corridor_sample_step_m,
+            self.planner_config.footprint_front_m,
+            self.planner_config.footprint_rear_m,
+            self.planner_config.path_collision_sample_step_m,
+        )
+        return collision or min_clearance < self.planner_config.min_clearance_m
+
+    def _publish_centerline_path(
+        self,
+        stamp,
+        position: np.ndarray,
+        yaw: float,
+        start_s: float,
+    ) -> None:
+        if self.reference is None:
+            self.publish_stop_path(stamp, position, yaw)
+            return
+        centerline = sample_reference_segment(
+            self.reference,
+            start_s,
+            self.centerline_return_lookahead_m,
+            self.centerline_return_step_m,
+            d=0.0,
+        )
+        anchored = trim_path_to_position(
+            centerline,
+            position,
+            self.min_published_path_length_m,
+            self.published_path_lookahead_m,
+        )
+        if len(anchored) < 2:
+            self.publish_stop_path(stamp, position, yaw)
+            return
+        self.publish_debug_markers(stamp, [], None)
+        self.publish_path(stamp, anchored)
+
+    def _publish_held_path_if_safe(
+        self,
+        stamp,
+        now: float,
+        occupancy,
+        vehicle_pose: tuple[float, float, float],
+    ) -> bool:
+        if (
+            self.last_safe_candidate_xy is None
+            or self.last_safe_candidate_time is None
+        ):
+            return False
+
+        collision, min_clearance = occupancy.query_path(
+            self.last_safe_candidate_xy,
+            vehicle_pose,
+            self.planner_config.corridor_radius_m,
+            self.planner_config.corridor_sample_step_m,
+            self.planner_config.footprint_front_m,
+            self.planner_config.footprint_rear_m,
+            self.planner_config.path_collision_sample_step_m,
+        )
+        if collision or min_clearance < self.planner_config.min_clearance_m:
+            return False
+
+        if self.latest_odom is not None:
+            publish_position, _ = self._odom_pose(self.latest_odom)
+        else:
+            publish_position = np.array([vehicle_pose[0], vehicle_pose[1]], dtype=float)
+        anchored = trim_path_to_position(
+            self.last_safe_candidate_xy,
+            publish_position,
+            self.min_published_path_length_m,
+            self.published_path_lookahead_m,
+        )
+        if len(anchored) < 2:
+            return False
+
+        self.current_mode = "hold"
+        self._log_mode(
+            now,
+            f"Holding safe Frenet path (clearance={min_clearance:.2f}m).",
+        )
+        self.publish_path(stamp, anchored)
+        return True
 
     def log_no_candidate(
         self,
@@ -379,7 +530,7 @@ class FrenetStaticObstaclePlanner(Node):
             f"best_clearance={stats.best_clearance_m:.2f}m, "
             f"occupied_cells={occupied_cells}, static_map_ready={static_map_ready}, "
             f"s={state.s:.2f}, d={state.d:.2f}, s_dot={state.s_dot:.2f}, "
-            f"d_dot={state.d_dot:.2f}, speed={speed_mps:.2f}, "
+            f"s_ddot={state.s_ddot:.2f}, d_dot={state.d_dot:.2f}, speed={speed_mps:.2f}, "
             f"scan_zero_like={zero_like_count}/{finite_count})."
         )
 
@@ -466,6 +617,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.last_safe_candidate_xy,
             publish_position,
             self.min_published_path_length_m,
+            self.published_path_lookahead_m,
         )
         if len(published_path) < 2:
             if now - self.last_path_drop_log_time >= 0.5:
@@ -579,6 +731,12 @@ class FrenetStaticObstaclePlanner(Node):
             f"clearance_reject={stats.clearance_rejections}, heading_reject={stats.heading_rejections}, "
             f"curvature_reject={stats.curvature_rejections}."
         )
+
+    def _log_mode(self, now: float, message: str) -> None:
+        if now - self.last_mode_log_time < 1.0:
+            return
+        self.last_mode_log_time = now
+        self.get_logger().info(message)
 
 
 def main(args=None) -> None:

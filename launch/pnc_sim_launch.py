@@ -94,6 +94,11 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_projection_search_window_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_stop_path_length_m', default_value='0.25'),
         DeclareLaunchArgument('frenet_min_published_path_length_m', default_value='0.75'),
+        DeclareLaunchArgument('frenet_published_path_lookahead_m', default_value='0.25'),
+        DeclareLaunchArgument('frenet_centerline_return_lookahead_m', default_value='5.0'),
+        DeclareLaunchArgument('frenet_centerline_return_step_m', default_value='0.08'),
+        DeclareLaunchArgument('frenet_centerline_threat_corridor_radius_m', default_value='0.32'),
+        DeclareLaunchArgument('frenet_centerline_threat_lookahead_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_reference_closed_loop', default_value='true'),
         DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
         DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
@@ -257,6 +262,21 @@ def generate_launch_description():
         frenet_min_published_path_length = LaunchConfiguration(
             'frenet_min_published_path_length_m'
         ).perform(context)
+        frenet_published_path_lookahead = LaunchConfiguration(
+            'frenet_published_path_lookahead_m'
+        ).perform(context)
+        frenet_centerline_return_lookahead = LaunchConfiguration(
+            'frenet_centerline_return_lookahead_m'
+        ).perform(context)
+        frenet_centerline_return_step = LaunchConfiguration(
+            'frenet_centerline_return_step_m'
+        ).perform(context)
+        frenet_centerline_threat_corridor_radius = LaunchConfiguration(
+            'frenet_centerline_threat_corridor_radius_m'
+        ).perform(context)
+        frenet_centerline_threat_lookahead = LaunchConfiguration(
+            'frenet_centerline_threat_lookahead_m'
+        ).perform(context)
         frenet_reference_closed_loop = LaunchConfiguration(
             'frenet_reference_closed_loop'
         ).perform(context)
@@ -337,6 +357,11 @@ def generate_launch_description():
                 '-p', f'projection_search_window_m:={frenet_projection_search_window}',
                 '-p', f'stop_path_length_m:={frenet_stop_path_length}',
                 '-p', f'min_published_path_length_m:={frenet_min_published_path_length}',
+                '-p', f'published_path_lookahead_m:={frenet_published_path_lookahead}',
+                '-p', f'centerline_return_lookahead_m:={frenet_centerline_return_lookahead}',
+                '-p', f'centerline_return_step_m:={frenet_centerline_return_step}',
+                '-p', f'centerline_threat_corridor_radius_m:={frenet_centerline_threat_corridor_radius}',
+                '-p', f'centerline_threat_lookahead_m:={frenet_centerline_threat_lookahead}',
                 '-p', f'reference_closed_loop:={frenet_reference_closed_loop}',
                 '-p', f'grid_inflation_radius_m:={frenet_inflation}',
                 '-p', f'grid_resolution_m:={frenet_resolution}',

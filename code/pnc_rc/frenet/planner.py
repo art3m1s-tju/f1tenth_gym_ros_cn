@@ -8,7 +8,12 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import KDTree
 
-from pnc_rc.lqr.geometry import PathProjection, interpolate_angle, project_to_path
+from pnc_rc.lqr.geometry import (
+    PathProjection,
+    advance_projection_along_path,
+    interpolate_angle,
+    project_to_path,
+)
 from pnc_rc.lqr.math import compute_path_curvatures, compute_path_headings, wrap_angle
 
 
@@ -491,9 +496,10 @@ def plan_frenet_path(
     debug_candidates: list[CandidatePath] | None = None,
 ) -> CandidatePath | None:
     candidates: list[CandidatePath] = []
+    planning_state = _forward_progress_planning_state(state)
     for d_final in _sample_range(config.d_min, config.d_max, config.d_step):
         for duration in _sample_range(config.t_min, config.t_max, config.t_step):
-            d_coeff = solve_quintic_lateral(state, d_final, duration)
+            d_coeff = solve_quintic_lateral(planning_state, d_final, duration)
             time_values = np.arange(
                 0.0,
                 duration + 0.5 * config.trajectory_dt,
@@ -503,7 +509,7 @@ def plan_frenet_path(
             for speed_final in _sample_range(config.v_min, config.v_max, config.v_step):
                 if stats is not None:
                     stats.total_candidates += 1
-                s_coeff = solve_quartic_longitudinal(state, speed_final, duration)
+                s_coeff = solve_quartic_longitudinal(planning_state, speed_final, duration)
                 s_values, s_dot_values, _, s_jerk_values = evaluate_quartic(s_coeff, time_values)
                 progress_ok = _has_valid_progress_profile(
                     s_values,
@@ -791,6 +797,7 @@ def trim_path_to_position(
     points: np.ndarray,
     position: np.ndarray,
     min_remaining_length_m: float = 0.0,
+    anchor_lookahead_m: float = 0.0,
 ) -> np.ndarray:
     points = np.asarray(points, dtype=float)
     if len(points) < 2:
@@ -798,6 +805,7 @@ def trim_path_to_position(
 
     headings = estimate_path_headings(points)
     curvatures = compute_path_curvatures(points, closed_loop=False)
+    segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
     kdtree = KDTree(points)
     projection = project_to_path(
         np.asarray(position, dtype=float),
@@ -807,6 +815,17 @@ def trim_path_to_position(
         curvatures,
         closed_loop=False,
     )
+    if anchor_lookahead_m > 0.0:
+        projection = advance_projection_along_path(
+            np.asarray(position, dtype=float),
+            projection,
+            float(anchor_lookahead_m),
+            points,
+            headings,
+            curvatures,
+            segment_lengths,
+            closed_loop=False,
+        )
 
     anchor = np.asarray(projection.point, dtype=float).reshape(1, 2)
     remaining_points = points[min(projection.segment_idx + 1, len(points) - 1) :]
@@ -814,6 +833,24 @@ def trim_path_to_position(
     if polyline_length(trimmed) < max(0.0, float(min_remaining_length_m)):
         return np.empty((0, 2), dtype=float)
     return trimmed
+
+
+def sample_reference_segment(
+    reference: ReferencePath,
+    start_s: float,
+    length_m: float,
+    step_m: float,
+    d: float = 0.0,
+) -> np.ndarray:
+    length = max(0.0, float(length_m))
+    step = max(1e-3, float(step_m))
+    sample_s = np.arange(0.0, length + 0.5 * step, step, dtype=float)
+    if len(sample_s) == 0 or sample_s[-1] < length:
+        sample_s = np.append(sample_s, length)
+    return np.array(
+        [reference.sample(start_s + offset, d)[0] for offset in sample_s],
+        dtype=float,
+    )
 
 
 def polyline_length(points: np.ndarray) -> float:
@@ -853,6 +890,22 @@ def _has_valid_progress_profile(
     if total_progress < config.min_progress_step_m:
         return False
     return True
+
+
+def _forward_progress_planning_state(state: FrenetState) -> FrenetState:
+    if state.s_ddot >= 0.0:
+        return state
+    # Odom-derived deceleration is noisy around stops/collisions. A large
+    # negative seed can make every quartic candidate briefly reverse, which
+    # turns a recoverable slowdown into a forced stop path.
+    return FrenetState(
+        s=state.s,
+        d=state.d,
+        s_dot=state.s_dot,
+        d_dot=state.d_dot,
+        s_ddot=0.0,
+        d_ddot=state.d_ddot,
+    )
 
 
 def _sample_range(start: float, stop: float, step: float) -> np.ndarray:
