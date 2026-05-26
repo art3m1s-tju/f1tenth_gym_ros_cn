@@ -4,6 +4,7 @@
 #   ./run_frenet_test.sh                              # launch simulator + RViz
 #   ./run_frenet_test.sh --target-speed 1.0          # set LQR cruise speed
 #   ./run_frenet_test.sh --avoidance-speed 0.75      # set Frenet local speed cap
+#   ./run_frenet_test.sh --open-map                  # use the old free-space map
 #   ./run_frenet_test.sh --headless                  # run unit tests + 25s headless launch
 #   ./run_frenet_test.sh --speed-test --target-speed 1.0 # run 90s headless speed test
 
@@ -15,10 +16,11 @@ CONTAINER_PKG="/sim_ws/src/f1tenth_gym_ros"
 MODE="rviz"
 TARGET_SPEED="${FRENET_TARGET_SPEED:-0.85}"
 AVOIDANCE_SPEED="${FRENET_AVOIDANCE_SPEED:-0.75}"
+MAP_VARIANT="${FRENET_MAP_VARIANT:-bounded}"
 
 usage() {
   cat <<USAGE
-Usage: $0 [--rviz|--headless|--speed-test] [--target-speed MPS] [--avoidance-speed MPS]
+Usage: $0 [--rviz|--headless|--speed-test] [--target-speed MPS] [--avoidance-speed MPS] [--bounded-map|--open-map]
 
 Options:
   --target-speed MPS   LQR global cruise speed in m/s. Default: ${TARGET_SPEED}
@@ -27,11 +29,14 @@ Options:
   --rviz               Launch simulator with RViz. Default mode.
   --headless           Run unit tests + 25s headless launch.
   --speed-test         Run unit tests + 90s headless launch.
+  --bounded-map        Use track-boundary map with static obstacles. Default.
+  --open-map           Use the previous free-space static-obstacle map.
 
 Environment:
   FRENET_TARGET_SPEED  Default target speed if --target-speed is omitted.
   FRENET_AVOIDANCE_SPEED
                        Default avoidance speed if --avoidance-speed is omitted.
+  FRENET_MAP_VARIANT   bounded or open. Default: ${MAP_VARIANT}
 USAGE
 }
 
@@ -67,6 +72,14 @@ while [[ $# -gt 0 ]]; do
       AVOIDANCE_SPEED="${1#*=}"
       shift
       ;;
+    --bounded-map)
+      MAP_VARIANT="bounded"
+      shift
+      ;;
+    --open-map)
+      MAP_VARIANT="open"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -87,6 +100,20 @@ if ! [[ "${AVOIDANCE_SPEED}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "[ERROR] avoidance speed must be a non-negative number, got: ${AVOIDANCE_SPEED}"
   exit 2
 fi
+case "${MAP_VARIANT}" in
+  bounded)
+    MAP_NAME="frenet_test_two_blocks"
+    TRACK_NAME="frenet_test_loop_processed_track.csv"
+    ;;
+  open)
+    MAP_NAME="frenet_test_open_two_blocks"
+    TRACK_NAME="frenet_test_loop_open_processed_track.csv"
+    ;;
+  *)
+    echo "[ERROR] map variant must be 'bounded' or 'open', got: ${MAP_VARIANT}"
+    exit 2
+    ;;
+esac
 
 ENABLE_RVIZ="true"
 RUN_PREFIX=""
@@ -125,8 +152,8 @@ source /sim_ws/install/local_setup.bash
 ${RUN_TESTS}${RUN_PREFIX}ros2 launch f1tenth_gym_ros pnc_sim_launch.py \
 enable_rviz:=${ENABLE_RVIZ} \
 enable_frenet_planner:=true \
-map_path:=${CONTAINER_PKG}/maps/generated_static_obstacles/frenet_test_open_two_blocks \
-track_csv:=${CONTAINER_PKG}/code/outputs/generated_tracks/frenet_test_loop_open_processed_track.csv \
+map_path:=${CONTAINER_PKG}/maps/generated_static_obstacles/${MAP_NAME} \
+track_csv:=${CONTAINER_PKG}/code/outputs/generated_tracks/${TRACK_NAME} \
 trajectory_mode:=centerline \
 sx:=0.0 \
 sy:=5.0 \
@@ -187,6 +214,7 @@ echo " repo:        ${REPO_ROOT}"
 echo " image:       ${IMAGE}"
 echo " rviz:        ${ENABLE_RVIZ}"
 echo " mode:        ${MODE}"
+echo " map:         ${MAP_VARIANT} (${MAP_NAME})"
 echo " target_speed: ${TARGET_SPEED} m/s"
 echo " avoid_speed: ${AVOIDANCE_SPEED} m/s"
 echo "=========================================="

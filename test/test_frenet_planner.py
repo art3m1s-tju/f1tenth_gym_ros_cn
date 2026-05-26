@@ -19,6 +19,7 @@ from pnc_rc.frenet.planner import (
     evaluate_quartic,
     evaluate_quintic,
     initial_frenet_state,
+    local_static_map_occupancy,
     plan_frenet_path,
     sample_reference_segment,
     solve_quartic_longitudinal,
@@ -600,6 +601,61 @@ def test_occupancy_grid_footprint_detects_front_bumper_collision():
 
     assert not center_collision
     assert footprint_collision
+
+
+def test_static_map_boundaries_constrain_frenet_candidates():
+    map_resolution = 0.1
+    map_origin_xy = (-2.5, -2.0)
+    map_shape = (40, 50)
+    map_occupied = np.ones(map_shape, dtype=bool)
+    for row in range(map_shape[0]):
+        rows_from_bottom = map_shape[0] - 1 - row
+        y = map_origin_xy[1] + (rows_from_bottom + 0.5) * map_resolution
+        if -1.0 <= y <= 1.0:
+            map_occupied[row, :] = False
+
+    cfg = LocalGridConfig(
+        forward_m=3.0,
+        rear_m=0.5,
+        half_width_m=2.0,
+        resolution_m=0.05,
+        inflation_radius_m=0.05,
+        scan_offset_x_m=0.0,
+    )
+    static_occupied = local_static_map_occupancy(
+        map_occupied,
+        map_resolution,
+        map_origin_xy,
+        vehicle_pose=(0.0, 0.0, 0.0),
+        config=cfg,
+    )
+    grid = build_occupancy_grid(
+        np.array([], dtype=float),
+        angle_min=0.0,
+        angle_increment=1.0,
+        range_min=0.0,
+        range_max=10.0,
+        config=cfg,
+        static_occupied=static_occupied,
+    )
+
+    inside_path = np.array([[0.2, 0.0], [2.0, 0.0]], dtype=float)
+    outside_path = np.array([[0.2, 1.2], [2.0, 1.2]], dtype=float)
+
+    inside_collision, inside_clearance = grid.query_path(
+        inside_path,
+        (0.0, 0.0, 0.0),
+        path_sample_step_m=0.05,
+    )
+    outside_collision, _ = grid.query_path(
+        outside_path,
+        (0.0, 0.0, 0.0),
+        path_sample_step_m=0.05,
+    )
+
+    assert not inside_collision
+    assert inside_clearance > 0.4
+    assert outside_collision
 
 
 def test_planner_hard_rejects_low_clearance_candidate():

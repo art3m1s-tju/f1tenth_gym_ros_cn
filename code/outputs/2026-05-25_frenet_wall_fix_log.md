@@ -677,3 +677,111 @@ threat_distance=3.28m, activation_lookahead=3.23m, cruise_speed=0.85m/s -> still
 ```
 
 结论：低速场景下不再远距离提前降速，同时当前测试地图仍能稳定避障并覆盖超过一圈。
+
+## 2026-05-26: 切换到带赛道边界的静态障碍验证地图
+
+### 问题
+
+此前一键脚本默认使用：
+
+```text
+maps/generated_static_obstacles/frenet_test_open_two_blocks.pgm
+```
+
+该地图除两个方块障碍外全是 free space：
+
+```text
+frenet_test_open_two_blocks.pgm: occupied=128, free=153088
+```
+
+这只能验证自由空间静态绕障，不能证明候选轨迹会避开赛道内外边界。
+
+### 修正
+
+- `run_frenet_test.sh` 默认改用带内外边界的地图：
+
+```text
+maps/generated_static_obstacles/frenet_test_two_blocks.pgm
+code/outputs/generated_tracks/frenet_test_loop_processed_track.csv
+```
+
+- 保留旧自由空间测试入口：
+
+```text
+./run_frenet_test.sh --open-map
+```
+
+- 默认 bounded 入口：
+
+```text
+./run_frenet_test.sh --bounded-map
+```
+
+### 边界约束来源
+
+Frenet planner 已经订阅 `/map`，并在每次规划时把局部静态地图 occupied cells 合并进局部 occupancy grid。切换到 bounded map 后，内外赛道边界自然成为碰撞约束，不需要把边界单独硬编码成中心点或多边形。
+
+本次 bounded map 加载日志：
+
+```text
+Loaded static occupancy map (504x304, resolution=0.050m, occupied_cells=87524)
+```
+
+对比 open map 只有两个方块障碍：
+
+```text
+frenet_test_open_two_blocks.pgm: occupied=128
+frenet_test_two_blocks.pgm: occupied=87524
+```
+
+### 新增单测
+
+新增：
+
+```text
+test_static_map_boundaries_constrain_frenet_candidates
+```
+
+该测试构造一个带上下边界的局部静态地图，证明：
+
+- 赛道中心路径不 collision；
+- 越过边界的路径会 collision；
+- `local_static_map_occupancy + build_occupancy_grid + query_path` 链路能把静态地图边界作为 Frenet 碰撞约束。
+
+### bounded headless 验证
+
+运行：
+
+```text
+./run_frenet_test.sh --speed-test
+```
+
+当前默认参数：
+
+```text
+map: bounded (frenet_test_two_blocks)
+target_speed: 0.85m/s
+avoidance_speed: 0.75m/s
+```
+
+结果：
+
+```text
+stop/no-safe/open-loop endpoint count: 0
+ego_collision_count: 0
+far_threat_keep_centerline_count: 16
+duration: 83.71s
+distance: 68.27m
+v_actual mean/p50/p90/max: 0.804 / 0.850 / 0.850 / 0.850 m/s
+v_cmd mean/p50/p90/max: 0.810 / 0.850 / 0.850 / 0.850 m/s
+negative_v_path_count: 0
+```
+
+Frenet 规划日志中出现大量边界/障碍 collision reject，但仍能找到安全候选：
+
+```text
+Frenet planning cycle elapsed=0.318s, total=78, safe=10, collision_reject=57, clearance_reject=11
+Frenet planning cycle elapsed=0.389s, total=78, safe=17, collision_reject=49, clearance_reject=12
+```
+
+结论：当前 bounded 测试已经覆盖“静态障碍 + 赛道内外边界”约束，默认 preset 下可完成超过一圈且无碰撞、无 stop path、无速度反向。
