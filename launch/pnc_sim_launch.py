@@ -95,6 +95,9 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_stop_path_length_m', default_value='0.25'),
         DeclareLaunchArgument('frenet_min_published_path_length_m', default_value='0.75'),
         DeclareLaunchArgument('frenet_published_path_lookahead_m', default_value='0.25'),
+        DeclareLaunchArgument('frenet_min_path_publish_interval_s', default_value='0.25'),
+        DeclareLaunchArgument('frenet_path_republish_distance_m', default_value='0.50'),
+        DeclareLaunchArgument('frenet_path_republish_min_remaining_m', default_value='2.0'),
         DeclareLaunchArgument('frenet_centerline_return_lookahead_m', default_value='5.0'),
         DeclareLaunchArgument('frenet_centerline_return_step_m', default_value='0.08'),
         DeclareLaunchArgument('frenet_centerline_threat_corridor_radius_m', default_value='0.32'),
@@ -265,6 +268,15 @@ def generate_launch_description():
         frenet_published_path_lookahead = LaunchConfiguration(
             'frenet_published_path_lookahead_m'
         ).perform(context)
+        frenet_min_path_publish_interval = LaunchConfiguration(
+            'frenet_min_path_publish_interval_s'
+        ).perform(context)
+        frenet_path_republish_distance = LaunchConfiguration(
+            'frenet_path_republish_distance_m'
+        ).perform(context)
+        frenet_path_republish_min_remaining = LaunchConfiguration(
+            'frenet_path_republish_min_remaining_m'
+        ).perform(context)
         frenet_centerline_return_lookahead = LaunchConfiguration(
             'frenet_centerline_return_lookahead_m'
         ).perform(context)
@@ -358,6 +370,9 @@ def generate_launch_description():
                 '-p', f'stop_path_length_m:={frenet_stop_path_length}',
                 '-p', f'min_published_path_length_m:={frenet_min_published_path_length}',
                 '-p', f'published_path_lookahead_m:={frenet_published_path_lookahead}',
+                '-p', f'min_path_publish_interval_s:={frenet_min_path_publish_interval}',
+                '-p', f'path_republish_distance_m:={frenet_path_republish_distance}',
+                '-p', f'path_republish_min_remaining_m:={frenet_path_republish_min_remaining}',
                 '-p', f'centerline_return_lookahead_m:={frenet_centerline_return_lookahead}',
                 '-p', f'centerline_return_step_m:={frenet_centerline_return_step}',
                 '-p', f'centerline_threat_corridor_radius_m:={frenet_centerline_threat_corridor_radius}',

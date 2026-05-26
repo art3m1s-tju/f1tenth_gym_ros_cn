@@ -26,6 +26,7 @@ from pnc_rc.frenet.planner import (
     initial_frenet_state,
     local_static_map_occupancy,
     plan_frenet_path,
+    polyline_length,
     sample_reference_segment,
     trim_path_to_position,
 )
@@ -86,6 +87,9 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("stop_path_length_m", 0.25)
         self.declare_parameter("min_published_path_length_m", 0.75)
         self.declare_parameter("published_path_lookahead_m", 0.25)
+        self.declare_parameter("min_path_publish_interval_s", 0.25)
+        self.declare_parameter("path_republish_distance_m", 0.50)
+        self.declare_parameter("path_republish_min_remaining_m", 2.0)
         self.declare_parameter("centerline_return_lookahead_m", 5.0)
         self.declare_parameter("centerline_return_step_m", 0.08)
         self.declare_parameter("centerline_threat_corridor_radius_m", 0.32)
@@ -202,6 +206,18 @@ class FrenetStaticObstaclePlanner(Node):
             0.0,
             float(self.get_parameter("published_path_lookahead_m").value),
         )
+        self.min_path_publish_interval_s = max(
+            0.0,
+            float(self.get_parameter("min_path_publish_interval_s").value),
+        )
+        self.path_republish_distance_m = max(
+            0.0,
+            float(self.get_parameter("path_republish_distance_m").value),
+        )
+        self.path_republish_min_remaining_m = max(
+            0.0,
+            float(self.get_parameter("path_republish_min_remaining_m").value),
+        )
         self.centerline_return_lookahead_m = max(
             0.5,
             float(self.get_parameter("centerline_return_lookahead_m").value),
@@ -230,6 +246,9 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_path_drop_log_time = 0.0
         self.last_mode_log_time = 0.0
         self.current_mode = "centerline"
+        self.last_published_path_xy: np.ndarray | None = None
+        self.last_published_path_time: float | None = None
+        self.last_published_path_mode: str | None = None
         self.previous_odom_position: np.ndarray | None = None
         self.previous_odom_time: float | None = None
         self.previous_odom_wall_time: float | None = None
@@ -397,7 +416,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_safe_candidate_xy = np.asarray(candidate.xy, dtype=float).copy()
         self.last_safe_candidate_time = now
         self.publish_debug_markers(stamp, debug_candidates, candidate)
-        self.publish_path(stamp, anchored_candidate)
+        self.publish_path(stamp, anchored_candidate, mode="avoidance", force=True)
 
     def _centerline_has_obstacle(
         self,
@@ -452,7 +471,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.publish_stop_path(stamp, position, yaw)
             return
         self.publish_debug_markers(stamp, [], None)
-        self.publish_path(stamp, anchored)
+        self.publish_path(stamp, anchored, mode="centerline")
 
     def _publish_held_path_if_safe(
         self,
@@ -497,7 +516,7 @@ class FrenetStaticObstaclePlanner(Node):
             now,
             f"Holding safe Frenet path (clearance={min_clearance:.2f}m).",
         )
-        self.publish_path(stamp, anchored)
+        self.publish_path(stamp, anchored, mode="avoidance")
         return True
 
     def log_no_candidate(
@@ -541,9 +560,19 @@ class FrenetStaticObstaclePlanner(Node):
             dtype=float,
         )
         points = position.reshape(1, 2) + offsets.reshape(-1, 1) * forward.reshape(1, 2)
-        self.publish_path(stamp, points)
+        self.publish_path(stamp, points, mode="stop", force=True)
 
-    def publish_path(self, stamp, points: np.ndarray) -> None:
+    def publish_path(
+        self,
+        stamp,
+        points: np.ndarray,
+        mode: str = "path",
+        force: bool = False,
+    ) -> bool:
+        now = time.monotonic()
+        points = np.asarray(points, dtype=float)
+        if not force and not self._should_publish_path(now, points, mode):
+            return False
         path_msg = PathMsg()
         path_msg.header.stamp = stamp
         path_msg.header.frame_id = self.frame_id
@@ -561,6 +590,44 @@ class FrenetStaticObstaclePlanner(Node):
             pose.pose.orientation.w = qw
             path_msg.poses.append(pose)
         self.path_pub.publish(path_msg)
+        self.last_published_path_xy = points.copy()
+        self.last_published_path_time = now
+        self.last_published_path_mode = mode
+        return True
+
+    def _should_publish_path(self, now: float, points: np.ndarray, mode: str) -> bool:
+        if (
+            self.last_published_path_xy is None
+            or self.last_published_path_time is None
+            or self.last_published_path_mode != mode
+        ):
+            return True
+
+        if now - self.last_published_path_time < self.min_path_publish_interval_s:
+            return False
+
+        if self.latest_odom is not None:
+            position, _ = self._odom_pose(self.latest_odom)
+            if self._published_path_remaining_length(position) < self.path_republish_min_remaining_m:
+                return True
+
+        if self.path_republish_distance_m <= 0.0:
+            return True
+
+        endpoint_shift = float(
+            np.linalg.norm(points[-1] - self.last_published_path_xy[-1])
+        )
+        return endpoint_shift >= self.path_republish_distance_m
+
+    def _published_path_remaining_length(self, position: np.ndarray) -> float:
+        if self.last_published_path_xy is None:
+            return 0.0
+        remaining = trim_path_to_position(
+            self.last_published_path_xy,
+            position,
+            min_remaining_length_m=0.0,
+        )
+        return polyline_length(remaining)
 
     def publish_debug_markers(self, stamp, candidates, best_candidate) -> None:
         marker_array = MarkerArray()
@@ -633,7 +700,7 @@ class FrenetStaticObstaclePlanner(Node):
                 "No safe Frenet candidate in current cycle; reusing last safe path "
                 f"(age={age:.2f}s, clearance={min_clearance:.2f}m)."
             )
-        self.publish_path(stamp, published_path)
+        self.publish_path(stamp, published_path, mode="avoidance")
         return True
 
     def _delete_all_marker(self, stamp) -> Marker:
