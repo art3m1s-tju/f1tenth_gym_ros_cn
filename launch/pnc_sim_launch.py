@@ -54,6 +54,8 @@ def generate_launch_description():
         DeclareLaunchArgument('max_steering_angle', default_value='0.36'),
         DeclareLaunchArgument('use_tf_pose', default_value='true'),
         DeclareLaunchArgument('enable_curvature_speed_limit', default_value='true'),
+        DeclareLaunchArgument('local_speed_limit_topic', default_value='/local_trajectory_speed_limit'),
+        DeclareLaunchArgument('local_speed_limit_timeout_s', default_value='1.0'),
         DeclareLaunchArgument('curvature_speed_lookahead_m', default_value='1.0'),
         DeclareLaunchArgument('enable_speed_ramp', default_value='true'),
         DeclareLaunchArgument('max_accel', default_value='1.0'),
@@ -103,6 +105,9 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_centerline_threat_corridor_radius_m', default_value='0.32'),
         DeclareLaunchArgument('frenet_centerline_threat_lookahead_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_reference_closed_loop', default_value='true'),
+        DeclareLaunchArgument('frenet_centerline_speed_limit_mps', default_value='-1.0'),
+        DeclareLaunchArgument('frenet_avoidance_speed_limit_mps', default_value='0.70'),
+        DeclareLaunchArgument('frenet_stop_speed_limit_mps', default_value='0.0'),
         DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
         DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
         DeclareLaunchArgument('frenet_grid_forward_m', default_value='7.0'),
@@ -213,6 +218,12 @@ def generate_launch_description():
         curvature_speed_limit = LaunchConfiguration(
             'enable_curvature_speed_limit'
         ).perform(context)
+        local_speed_limit_topic = LaunchConfiguration(
+            'local_speed_limit_topic'
+        ).perform(context)
+        local_speed_limit_timeout = LaunchConfiguration(
+            'local_speed_limit_timeout_s'
+        ).perform(context)
         curvature_lookahead = LaunchConfiguration(
             'curvature_speed_lookahead_m'
         ).perform(context)
@@ -292,6 +303,15 @@ def generate_launch_description():
         frenet_reference_closed_loop = LaunchConfiguration(
             'frenet_reference_closed_loop'
         ).perform(context)
+        frenet_centerline_speed_limit = LaunchConfiguration(
+            'frenet_centerline_speed_limit_mps'
+        ).perform(context)
+        frenet_avoidance_speed_limit = LaunchConfiguration(
+            'frenet_avoidance_speed_limit_mps'
+        ).perform(context)
+        frenet_stop_speed_limit = LaunchConfiguration(
+            'frenet_stop_speed_limit_mps'
+        ).perform(context)
         frenet_inflation = LaunchConfiguration('frenet_grid_inflation_radius_m').perform(context)
         frenet_resolution = LaunchConfiguration('frenet_grid_resolution_m').perform(context)
         frenet_grid_forward = LaunchConfiguration('frenet_grid_forward_m').perform(context)
@@ -339,6 +359,7 @@ def generate_launch_description():
                 '-r', '__node:=frenet_static_obstacle_planner',
                 '-p', 'global_path_topic:=/global_trajectory',
                 '-p', 'local_path_topic:=/local_trajectory',
+                '-p', f'speed_limit_topic:={local_speed_limit_topic}',
                 '-p', 'odom_topic:=/ego_racecar/odom',
                 '-p', 'scan_topic:=/scan',
                 '-p', 'map_topic:=/map',
@@ -378,6 +399,9 @@ def generate_launch_description():
                 '-p', f'centerline_threat_corridor_radius_m:={frenet_centerline_threat_corridor_radius}',
                 '-p', f'centerline_threat_lookahead_m:={frenet_centerline_threat_lookahead}',
                 '-p', f'reference_closed_loop:={frenet_reference_closed_loop}',
+                '-p', f'centerline_speed_limit_mps:={frenet_centerline_speed_limit}',
+                '-p', f'avoidance_speed_limit_mps:={frenet_avoidance_speed_limit}',
+                '-p', f'stop_speed_limit_mps:={frenet_stop_speed_limit}',
                 '-p', f'grid_inflation_radius_m:={frenet_inflation}',
                 '-p', f'grid_resolution_m:={frenet_resolution}',
                 '-p', f'grid_forward_m:={frenet_grid_forward}',
@@ -405,6 +429,8 @@ def generate_launch_description():
             '-p', f'max_steering_angle:={max_steer}',
             '-p', f'max_lateral_accel:={max_lat_accel}',
             '-p', f'enable_curvature_speed_limit:={curvature_speed_limit}',
+            '-p', f'speed_limit_topic:={local_speed_limit_topic if frenet_enabled else ""}',
+            '-p', f'speed_limit_timeout_s:={local_speed_limit_timeout}',
             '-p', f'curvature_speed_lookahead_m:={curvature_lookahead}',
             '-p', f'enable_speed_ramp:={speed_ramp}',
             '-p', f'max_accel:={accel}',

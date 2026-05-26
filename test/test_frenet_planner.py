@@ -25,6 +25,7 @@ from pnc_rc.frenet.planner import (
     solve_quintic_lateral,
     swept_corridor_points,
     trim_path_to_position,
+    _forward_progress_planning_state,
 )
 
 
@@ -61,6 +62,28 @@ def test_quartic_longitudinal_uses_initial_acceleration():
     assert np.isclose(s_ddot0[0], state.s_ddot)
     assert np.isclose(s_dotf[0], 2.0)
     assert abs(s_ddotf[0]) < 1e-9
+
+
+def test_forward_progress_planning_state_filters_noisy_acceleration():
+    noisy_accel = FrenetState(
+        s=2.0,
+        d=0.1,
+        s_dot=0.8,
+        d_dot=0.0,
+        s_ddot=3.8,
+        d_ddot=0.0,
+    )
+    noisy_brake = FrenetState(
+        s=2.0,
+        d=0.1,
+        s_dot=0.8,
+        d_dot=0.0,
+        s_ddot=-0.5,
+        d_ddot=0.0,
+    )
+
+    assert _forward_progress_planning_state(noisy_accel).s_ddot == 0.0
+    assert _forward_progress_planning_state(noisy_brake).s_ddot == 0.0
 
 
 def test_reference_path_projection_and_sampling_round_trip():

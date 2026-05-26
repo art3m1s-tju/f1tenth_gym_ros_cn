@@ -893,17 +893,20 @@ def _has_valid_progress_profile(
 
 
 def _forward_progress_planning_state(state: FrenetState) -> FrenetState:
-    if state.s_ddot >= 0.0:
+    s_ddot = state.s_ddot
+    if abs(s_ddot) > 1.0:
+        s_ddot = 0.0
+    if s_ddot >= 0.0 and abs(s_ddot - state.s_ddot) <= 1e-9:
         return state
-    # Odom-derived deceleration is noisy around stops/collisions. A large
-    # negative seed can make every quartic candidate briefly reverse, which
-    # turns a recoverable slowdown into a forced stop path.
+    # Odom/projection-derived acceleration is noisy around path switches and
+    # obstacle transitions. Large seeds make quartic candidates either reverse
+    # or surge into the obstacle before lateral motion has time to develop.
     return FrenetState(
         s=state.s,
         d=state.d,
         s_dot=state.s_dot,
         d_dot=state.d_dot,
-        s_ddot=0.0,
+        s_ddot=max(0.0, s_ddot),
         d_ddot=state.d_ddot,
     )
 

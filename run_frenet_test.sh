@@ -3,6 +3,7 @@
 # Usage:
 #   ./run_frenet_test.sh            # launch simulator + RViz
 #   ./run_frenet_test.sh --headless # run unit tests + 25s headless launch
+#   ./run_frenet_test.sh --speed-test # run unit tests + 90s headless launch
 
 set -euo pipefail
 
@@ -11,8 +12,8 @@ IMAGE="${F1TENTH_DOCKER_IMAGE:-f1tenth_gym_ros:latest}"
 CONTAINER_PKG="/sim_ws/src/f1tenth_gym_ros"
 MODE="${1:-rviz}"
 
-if [[ "${MODE}" != "rviz" && "${MODE}" != "--rviz" && "${MODE}" != "--headless" ]]; then
-  echo "Usage: $0 [--rviz|--headless]"
+if [[ "${MODE}" != "rviz" && "${MODE}" != "--rviz" && "${MODE}" != "--headless" && "${MODE}" != "--speed-test" ]]; then
+  echo "Usage: $0 [--rviz|--headless|--speed-test]"
   exit 2
 fi
 
@@ -21,9 +22,13 @@ RUN_PREFIX=""
 RUN_SUFFIX=""
 RUN_TESTS=""
 TTY_ARGS=(-it)
-if [[ "${MODE}" == "--headless" ]]; then
+if [[ "${MODE}" == "--headless" || "${MODE}" == "--speed-test" ]]; then
   ENABLE_RVIZ="false"
-  RUN_PREFIX="timeout 25s "
+  HEADLESS_TIMEOUT_S="${FRENET_HEADLESS_TIMEOUT_S:-25}"
+  if [[ "${MODE}" == "--speed-test" ]]; then
+    HEADLESS_TIMEOUT_S="${FRENET_SPEED_TEST_TIMEOUT_S:-90}"
+  fi
+  RUN_PREFIX="timeout ${HEADLESS_TIMEOUT_S}s "
   RUN_SUFFIX=" || [[ \$? -eq 124 ]]"
   RUN_TESTS="PYTHONDONTWRITEBYTECODE=1 python3 -m pytest ${CONTAINER_PKG}/test/test_frenet_planner.py -q && "
   TTY_ARGS=()
@@ -55,13 +60,17 @@ trajectory_mode:=centerline \
 sx:=0.0 \
 sy:=5.0 \
 stheta:=3.1416 \
-target_speed:=0.55 \
-min_speed:=0.15 \
-max_lateral_accel:=1.0 \
-max_accel:=0.6 \
-max_decel:=1.5 \
+target_speed:=0.85 \
+min_speed:=0.20 \
+max_lateral_accel:=1.5 \
+max_accel:=1.0 \
+max_decel:=2.0 \
 curvature_speed_lookahead_m:=1.5 \
-frenet_reference_closed_loop:=false \
+local_speed_limit_timeout_s:=1.0 \
+frenet_reference_closed_loop:=true \
+frenet_centerline_speed_limit_mps:=-1.0 \
+frenet_avoidance_speed_limit_mps:=0.65 \
+frenet_stop_speed_limit_mps:=0.0 \
 frenet_target_speed:=1.2 \
 frenet_v_min:=0.8 \
 frenet_v_max:=1.8 \
@@ -75,7 +84,7 @@ frenet_d_max:=1.8 \
 frenet_d_step:=0.3 \
 frenet_max_heading_jump:=0.85 \
 frenet_grid_inflation_radius_m:=0.18 \
-frenet_grid_forward_m:=8.0 \
+frenet_grid_forward_m:=10.0 \
 frenet_grid_half_width_m:=3.2 \
 frenet_max_curvature:=1.1 \
 frenet_corridor_radius_m:=0.16 \
@@ -90,7 +99,7 @@ frenet_min_path_publish_interval_s:=0.25 \
 frenet_path_republish_distance_m:=0.50 \
 frenet_path_republish_min_remaining_m:=2.0 \
 frenet_centerline_return_lookahead_m:=5.0 \
-frenet_centerline_threat_lookahead_m:=6.0 \
+frenet_centerline_threat_lookahead_m:=8.0 \
 frenet_centerline_threat_corridor_radius_m:=0.22 \
 frenet_reuse_last_candidate_timeout_s:=1.0${RUN_SUFFIX}
 EOF

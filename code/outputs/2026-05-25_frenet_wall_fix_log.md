@@ -512,3 +512,59 @@ max_abs_curvature_preview: 1.524
 - CSV 已能直接检查 signed velocity 是否变负；
 - `gym_bridge` 已能在真实 gym collision 时打印 warning；
 - 仍建议后续继续降低局部轨迹曲率尖峰，当前 LQR 侧看到的最大曲率仍略高于 Frenet 的 `1.1 1/m` 目标，虽然本次未触发碰撞。
+
+## 2026-05-26: 全局巡航速度与 Frenet 避障局部限速解耦
+
+### 问题
+
+`target_speed` 应表示 LQR 的全局巡航速度。此前为了让避障慢下来，只能把 `target_speed` 整体降到 `0.75m/s` 或更低，导致无障碍中心线段也跑不快。更合理的语义是：
+
+- centerline / global tracking：按 `target_speed` 巡航；
+- avoidance / hold：Frenet 发布局部限速；
+- stop path：Frenet 发布 `0.0m/s` 限速。
+
+### 修正
+
+- Frenet 新增 `/local_trajectory_speed_limit` 发布，使用 `std_msgs/Float32`：
+  - `centerline_speed_limit_mps < 0` 表示清除局部限速；
+  - `avoidance_speed_limit_mps` 表示绕障段限速；
+  - `stop_speed_limit_mps=0.0` 表示 emergency stop。
+- LQR 新增局部限速订阅，速度命令变为：
+
+```text
+v_cmd = min(target_speed, curvature_speed_limit, local_speed_limit)
+```
+
+- 局部限速独立于路径发布 debounce：即使 `/local_trajectory` 不重发，Frenet 也会持续刷新当前模式限速，避免 LQR 在避障路径中途恢复巡航速度。
+- Frenet 规划种子过滤异常 `s_ddot`：当 odom/projection 差分给出不可信大加速度时，将纵向初始加速度置零，避免 quartic 候选在起点处过快冲入障碍物。
+
+### 当前一键测试 preset
+
+- LQR `target_speed=0.85m/s`
+- Frenet avoidance local speed limit `0.65m/s`
+- Frenet reference `closed_loop=true`
+- speed-test 默认 `90s`，用于覆盖超过一圈的运行。
+
+### 验证结果
+
+容器内单元测试：
+
+```text
+26 passed in 0.25s
+```
+
+90 秒 headless speed-test：
+
+```text
+stop/no-safe/open-loop endpoint count: 0
+centerline_return_count: 40
+frenet_plan_count: 12
+duration: 83.64s
+distance: 62.33m
+v_actual mean/p50/p90/max: 0.728 / 0.650 / 0.850 / 0.850 m/s
+v_cmd mean/p50/p90/max: 0.733 / 0.650 / 0.850 / 0.850 m/s
+negative_v_path_count: 0
+near_zero_v_cmd_count: 13
+```
+
+结论：当前分支下，第一圈和进入第二圈后均未出现 stop path 或速度反向；避障段按局部限速慢行，非避障段恢复全局巡航速度。

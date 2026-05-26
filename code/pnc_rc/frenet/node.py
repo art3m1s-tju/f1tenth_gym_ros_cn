@@ -14,6 +14,7 @@ from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Float32
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 
@@ -48,6 +49,7 @@ class FrenetStaticObstaclePlanner(Node):
 
         self.declare_parameter("global_path_topic", "/global_trajectory")
         self.declare_parameter("local_path_topic", "/local_trajectory")
+        self.declare_parameter("speed_limit_topic", "/local_trajectory_speed_limit")
         self.declare_parameter("odom_topic", "/ego_racecar/odom")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("map_topic", "/map")
@@ -95,6 +97,9 @@ class FrenetStaticObstaclePlanner(Node):
         self.declare_parameter("centerline_threat_corridor_radius_m", 0.32)
         self.declare_parameter("centerline_threat_lookahead_m", 6.0)
         self.declare_parameter("reference_closed_loop", True)
+        self.declare_parameter("centerline_speed_limit_mps", -1.0)
+        self.declare_parameter("avoidance_speed_limit_mps", 0.70)
+        self.declare_parameter("stop_speed_limit_mps", 0.0)
 
         self.frame_id = str(self.get_parameter("frame_id").value)
         self.planner_config = FrenetPlannerConfig(
@@ -140,6 +145,11 @@ class FrenetStaticObstaclePlanner(Node):
         self.path_pub = self.create_publisher(
             PathMsg,
             str(self.get_parameter("local_path_topic").value),
+            qos_profile,
+        )
+        self.speed_limit_pub = self.create_publisher(
+            Float32,
+            str(self.get_parameter("speed_limit_topic").value),
             qos_profile,
         )
         self.debug_marker_pub = self.create_publisher(
@@ -234,6 +244,15 @@ class FrenetStaticObstaclePlanner(Node):
             0.5,
             float(self.get_parameter("centerline_threat_lookahead_m").value),
         )
+        self.centerline_speed_limit_mps = float(
+            self.get_parameter("centerline_speed_limit_mps").value
+        )
+        self.avoidance_speed_limit_mps = float(
+            self.get_parameter("avoidance_speed_limit_mps").value
+        )
+        self.stop_speed_limit_mps = float(
+            self.get_parameter("stop_speed_limit_mps").value
+        )
         publish_rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
         self.timer = self.create_timer(1.0 / publish_rate, self.plan_once)
         self.last_safe_candidate_xy: np.ndarray | None = None
@@ -256,6 +275,7 @@ class FrenetStaticObstaclePlanner(Node):
         self.get_logger().info(
             "Frenet static obstacle planner started "
             f"(local_path={self.path_pub.topic_name}, "
+            f"speed_limit_topic={self.speed_limit_pub.topic_name}, "
             f"debug_markers={self.debug_marker_pub.topic_name}, "
             f"rate={publish_rate:.1f}Hz)."
         )
@@ -572,6 +592,7 @@ class FrenetStaticObstaclePlanner(Node):
         now = time.monotonic()
         points = np.asarray(points, dtype=float)
         if not force and not self._should_publish_path(now, points, mode):
+            self._publish_speed_limit(mode)
             return False
         path_msg = PathMsg()
         path_msg.header.stamp = stamp
@@ -590,10 +611,26 @@ class FrenetStaticObstaclePlanner(Node):
             pose.pose.orientation.w = qw
             path_msg.poses.append(pose)
         self.path_pub.publish(path_msg)
+        self._publish_speed_limit(mode)
         self.last_published_path_xy = points.copy()
         self.last_published_path_time = now
         self.last_published_path_mode = mode
         return True
+
+    def _publish_speed_limit(self, mode: str) -> None:
+        limit = self._speed_limit_for_mode(mode)
+        msg = Float32()
+        msg.data = float(limit)
+        self.speed_limit_pub.publish(msg)
+
+    def _speed_limit_for_mode(self, mode: str) -> float:
+        if mode == "stop":
+            return max(0.0, self.stop_speed_limit_mps)
+        if mode == "avoidance":
+            return self.avoidance_speed_limit_mps
+        if mode == "centerline":
+            return self.centerline_speed_limit_mps
+        return math.nan
 
     def _should_publish_path(self, now: float, points: np.ndarray, mode: str) -> bool:
         if (

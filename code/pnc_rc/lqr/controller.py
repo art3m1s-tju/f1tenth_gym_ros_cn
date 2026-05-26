@@ -34,6 +34,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
 from scipy.spatial import KDTree
+from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from pnc_rc.lqr.math import (
@@ -115,6 +116,7 @@ class LqrController(Node):
         self.declare_parameter("path_topic", "/global_trajectory")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("drive_topic", "/drive")
+        self.declare_parameter("speed_limit_topic", "")
         self.declare_parameter("tracked_frame", "")
         self.declare_parameter("use_tf_pose", True)
         self.declare_parameter("vehicle_frame", "base_link")
@@ -130,6 +132,7 @@ class LqrController(Node):
         self.declare_parameter("max_steering_angle", 0.61)
         self.declare_parameter("max_lateral_accel", 3.0)
         self.declare_parameter("enable_curvature_speed_limit", True)
+        self.declare_parameter("speed_limit_timeout_s", 1.0)
         self.declare_parameter("curvature_speed_lookahead_m", 1.0)
         self.declare_parameter("enable_speed_ramp", True)
         self.declare_parameter("max_accel", 0.8)
@@ -166,6 +169,7 @@ class LqrController(Node):
         self.path_topic = str(self.get_parameter("path_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
         self.drive_topic = str(self.get_parameter("drive_topic").value)
+        self.speed_limit_topic = str(self.get_parameter("speed_limit_topic").value)
         self.tracked_frame = str(self.get_parameter("tracked_frame").value)
         self.use_tf_pose = bool(self.get_parameter("use_tf_pose").value)
         self.vehicle_frame = str(self.get_parameter("vehicle_frame").value)
@@ -195,6 +199,10 @@ class LqrController(Node):
         )
         self.enable_curvature_speed_limit = bool(
             self.get_parameter("enable_curvature_speed_limit").value
+        )
+        self.speed_limit_timeout_s = max(
+            0.0,
+            float(self.get_parameter("speed_limit_timeout_s").value),
         )
         self.curvature_speed_lookahead_m = max(
             0.0,
@@ -278,6 +286,10 @@ class LqrController(Node):
         self.previous_position_for_velocity: np.ndarray | None = None
         self.previous_delta_cmd = 0.0
         self.current_speed_cmd = 0.0  # 速度斜坡当前值
+        self.local_speed_limit_mps: float | None = None
+        self.local_speed_limit_wall_time: float | None = None
+        self.last_speed_limit_log_time = 0.0
+        self.last_logged_speed_limit_mps: float | None = None
         self.open_loop_finished = False
         self.filtered_lateral_error: float | None = None
         self.filtered_heading_error: float | None = None
@@ -317,6 +329,15 @@ class LqrController(Node):
             self.odom_callback,
             10,
         )
+        if self.speed_limit_topic:
+            self.speed_limit_sub = self.create_subscription(
+                Float32,
+                self.speed_limit_topic,
+                self.speed_limit_callback,
+                10,
+            )
+        else:
+            self.speed_limit_sub = None
         self.drive_pub = self.create_publisher(
             AckermannDriveStamped,
             self.drive_topic,
@@ -333,6 +354,7 @@ class LqrController(Node):
             f"(path_topic={self.path_topic}, odom_topic={self.odom_topic}, "
             f"drive_topic={self.drive_topic}, use_tf_pose={self.use_tf_pose}, "
             f"target_speed={self.target_speed:.2f}, "
+            f"speed_limit_topic={self.speed_limit_topic or 'disabled'}, "
             f"lqr_lookahead={self.lqr_lookahead_distance_m:.2f}m, "
             f"curvature_lookahead={self.curvature_speed_lookahead_m:.2f}m, "
             f"steering_rate_limit={self.enable_steering_rate_limit}"
@@ -383,6 +405,7 @@ class LqrController(Node):
                 "closest_idx",
                 "segment_idx",
                 "segment_t",
+                "local_speed_limit",
                 "compute_time_ms",
             ]
         )
@@ -434,6 +457,39 @@ class LqrController(Node):
             f"Loaded LQR reference path with {len(points)} points "
             f"(frame={self.path_frame_id}, closed_loop={self.path_closed_loop})."
         )
+
+    def speed_limit_callback(self, msg: Float32) -> None:
+        """接收 Frenet 局部限速；NaN 或负数表示清除局部限速。"""
+        limit = float(msg.data)
+        now = time.monotonic()
+        if math.isfinite(limit) and limit >= 0.0:
+            self.local_speed_limit_mps = limit
+        else:
+            self.local_speed_limit_mps = None
+        self.local_speed_limit_wall_time = now
+
+        changed = (
+            self.local_speed_limit_mps is None
+            and self.last_logged_speed_limit_mps is not None
+        ) or (
+            self.local_speed_limit_mps is not None
+            and (
+                self.last_logged_speed_limit_mps is None
+                or abs(
+                    self.local_speed_limit_mps - self.last_logged_speed_limit_mps
+                ) > 1e-3
+            )
+        )
+        if changed and now - self.last_speed_limit_log_time >= 0.2:
+            self.last_speed_limit_log_time = now
+            self.last_logged_speed_limit_mps = self.local_speed_limit_mps
+            if self.local_speed_limit_mps is None:
+                self.get_logger().info("Local trajectory speed limit cleared.")
+            else:
+                self.get_logger().info(
+                    "Local trajectory speed limit set to "
+                    f"{self.local_speed_limit_mps:.2f}m/s."
+                )
 
     def _compute_segment_lengths(self, points: np.ndarray) -> np.ndarray:
         """计算参考轨迹每个路径段的长度。"""
@@ -629,12 +685,27 @@ class LqrController(Node):
 
     def _compute_speed_command(self, delta_cmd: float, curvature_ref: float) -> float:
         """根据转向指令和参考曲率计算安全速度。"""
+        speed_cmd = self.target_speed
         if self.enable_curvature_speed_limit:
-            return compute_curvature_limited_speed(
+            speed_cmd = compute_curvature_limited_speed(
                 self.target_speed, curvature_ref, delta_cmd,
                 self.wheelbase, self.max_lateral_accel, self.min_speed,
             )
-        return self.target_speed
+        speed_limit = self._active_local_speed_limit()
+        if speed_limit is not None:
+            speed_cmd = min(speed_cmd, speed_limit)
+        return max(0.0, speed_cmd)
+
+    def _active_local_speed_limit(self) -> float | None:
+        if self.local_speed_limit_mps is None:
+            return None
+        if self.local_speed_limit_wall_time is None:
+            return None
+        if self.speed_limit_timeout_s > 0.0:
+            age = time.monotonic() - self.local_speed_limit_wall_time
+            if age > self.speed_limit_timeout_s:
+                return None
+        return max(0.0, self.local_speed_limit_mps)
 
     def _apply_steering_rate_limit(self, delta_cmd: float, dt: float) -> tuple[float, bool]:
         """限制相邻控制周期之间的转角命令变化率。"""
@@ -716,6 +787,7 @@ class LqrController(Node):
         delta_feedforward: float,
         delta_cmd: float,
         lqr_gain: np.ndarray,
+        local_speed_limit: float | None,
         compute_time_ms: float,
     ) -> None:
         """向跟踪日志 CSV 写入一行控制周期数据。"""
@@ -750,6 +822,7 @@ class LqrController(Node):
                 sample.closest_idx,
                 sample.segment_idx,
                 f"{sample.segment_t:.6f}",
+                "" if local_speed_limit is None else f"{local_speed_limit:.6f}",
                 f"{compute_time_ms:.6f}",
             ]
         )
@@ -889,6 +962,7 @@ class LqrController(Node):
         )
         delta_cmd, delta_rate_limited = self._apply_steering_rate_limit(delta_cmd, dt)
         curvature_preview = self._preview_curvature(sample)
+        local_speed_limit = self._active_local_speed_limit()
         desired_speed = self._compute_speed_command(delta_cmd, curvature_preview)
         v_cmd = self._apply_speed_ramp(desired_speed, stamp_sec)
 
@@ -925,6 +999,7 @@ class LqrController(Node):
             delta_feedforward=delta_feedforward,
             delta_cmd=delta_cmd,
             lqr_gain=lqr_gain,
+            local_speed_limit=local_speed_limit,
             compute_time_ms=compute_time_ms,
         )
         self.previous_stamp_sec = stamp_sec
