@@ -106,7 +106,7 @@ def generate_launch_description():
         DeclareLaunchArgument('frenet_centerline_threat_lookahead_m', default_value='6.0'),
         DeclareLaunchArgument('frenet_reference_closed_loop', default_value='true'),
         DeclareLaunchArgument('frenet_centerline_speed_limit_mps', default_value='-1.0'),
-        DeclareLaunchArgument('frenet_avoidance_speed_limit_mps', default_value='0.70'),
+        DeclareLaunchArgument('frenet_avoidance_speed_limit_mps', default_value='0.75'),
         DeclareLaunchArgument('frenet_stop_speed_limit_mps', default_value='0.0'),
         DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
         DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),

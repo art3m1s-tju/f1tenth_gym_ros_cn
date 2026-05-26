@@ -3,6 +3,7 @@
 # Usage:
 #   ./run_frenet_test.sh                              # launch simulator + RViz
 #   ./run_frenet_test.sh --target-speed 1.0          # set LQR cruise speed
+#   ./run_frenet_test.sh --avoidance-speed 0.75      # set Frenet local speed cap
 #   ./run_frenet_test.sh --headless                  # run unit tests + 25s headless launch
 #   ./run_frenet_test.sh --speed-test --target-speed 1.0 # run 90s headless speed test
 
@@ -13,19 +14,24 @@ IMAGE="${F1TENTH_DOCKER_IMAGE:-f1tenth_gym_ros:latest}"
 CONTAINER_PKG="/sim_ws/src/f1tenth_gym_ros"
 MODE="rviz"
 TARGET_SPEED="${FRENET_TARGET_SPEED:-0.85}"
+AVOIDANCE_SPEED="${FRENET_AVOIDANCE_SPEED:-0.75}"
 
 usage() {
   cat <<USAGE
-Usage: $0 [--rviz|--headless|--speed-test] [--target-speed MPS]
+Usage: $0 [--rviz|--headless|--speed-test] [--target-speed MPS] [--avoidance-speed MPS]
 
 Options:
   --target-speed MPS   LQR global cruise speed in m/s. Default: ${TARGET_SPEED}
+  --avoidance-speed MPS
+                       Frenet local speed limit while avoiding. Default: ${AVOIDANCE_SPEED}
   --rviz               Launch simulator with RViz. Default mode.
   --headless           Run unit tests + 25s headless launch.
   --speed-test         Run unit tests + 90s headless launch.
 
 Environment:
   FRENET_TARGET_SPEED  Default target speed if --target-speed is omitted.
+  FRENET_AVOIDANCE_SPEED
+                       Default avoidance speed if --avoidance-speed is omitted.
 USAGE
 }
 
@@ -48,6 +54,19 @@ while [[ $# -gt 0 ]]; do
       TARGET_SPEED="${1#*=}"
       shift
       ;;
+    --avoidance-speed|--avoidancespeed)
+      if [[ $# -lt 2 ]]; then
+        echo "[ERROR] --avoidance-speed requires a numeric value."
+        usage
+        exit 2
+      fi
+      AVOIDANCE_SPEED="$2"
+      shift 2
+      ;;
+    --avoidance-speed=*|--avoidancespeed=*)
+      AVOIDANCE_SPEED="${1#*=}"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -62,6 +81,10 @@ done
 
 if ! [[ "${TARGET_SPEED}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   echo "[ERROR] target speed must be a non-negative number, got: ${TARGET_SPEED}"
+  exit 2
+fi
+if ! [[ "${AVOIDANCE_SPEED}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "[ERROR] avoidance speed must be a non-negative number, got: ${AVOIDANCE_SPEED}"
   exit 2
 fi
 
@@ -117,7 +140,7 @@ curvature_speed_lookahead_m:=1.5 \
 local_speed_limit_timeout_s:=1.0 \
 frenet_reference_closed_loop:=true \
 frenet_centerline_speed_limit_mps:=-1.0 \
-frenet_avoidance_speed_limit_mps:=0.65 \
+frenet_avoidance_speed_limit_mps:=${AVOIDANCE_SPEED} \
 frenet_stop_speed_limit_mps:=0.0 \
 frenet_target_speed:=1.2 \
 frenet_v_min:=0.8 \
@@ -160,6 +183,7 @@ echo " image:       ${IMAGE}"
 echo " rviz:        ${ENABLE_RVIZ}"
 echo " mode:        ${MODE}"
 echo " target_speed: ${TARGET_SPEED} m/s"
+echo " avoid_speed: ${AVOIDANCE_SPEED} m/s"
 echo "=========================================="
 
 DOCKER_ARGS=(

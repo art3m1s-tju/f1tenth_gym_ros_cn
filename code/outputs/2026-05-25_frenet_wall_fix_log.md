@@ -568,3 +568,36 @@ near_zero_v_cmd_count: 13
 ```
 
 结论：当前分支下，第一圈和进入第二圈后均未出现 stop path 或速度反向；避障段按局部限速慢行，非避障段恢复全局巡航速度。
+
+## 2026-05-26: 提高 Frenet 避障段局部限速
+
+### 调整
+
+- `run_frenet_test.sh` 新增 `--avoidance-speed` / `--avoidancespeed` 参数；
+- 新增环境变量入口 `FRENET_AVOIDANCE_SPEED`；
+- 默认避障局部限速从 `0.65m/s` 提高到 `0.75m/s`；
+- launch 默认 `frenet_avoidance_speed_limit_mps` 同步为 `0.75`。
+
+### 验证结果
+
+使用新默认值运行：
+
+```text
+./run_frenet_test.sh --speed-test
+```
+
+结果：
+
+```text
+stop/no-safe/open-loop endpoint count: 0
+ego_collision_count: 0
+centerline_return_count: 41
+duration: 83.62s
+distance: 66.61m
+v_actual mean/p50/p90/max: 0.784 / 0.750 / 0.850 / 0.850 m/s
+v_cmd mean/p50/p90/max: 0.790 / 0.750 / 0.850 / 0.850 m/s
+local_speed_limit: 0.75 m/s
+negative_v_path_count: 0
+```
+
+结论：`0.75m/s` 作为当前测试地图的默认避障限速比 `0.65m/s` 更合适，速度提升明显，未复现停车、碰撞或反向速度。
