@@ -1,7 +1,16 @@
-"""Launch file: F1TENTH simulator + control_friendly planner + LQR controller."""
+"""启动 F1TENTH 仿真、全局规划、Frenet 局部规划、LQR 控制和 RViz。"""
 import os
+import sys
 import tempfile
+from pathlib import Path
+
 import yaml
+
+_LOCAL_CODE_DIR = Path(__file__).resolve().parents[1] / 'code'
+_CONTAINER_CODE_DIR = Path('/sim_ws/src/f1tenth_gym_ros/code')
+for _code_dir in (_LOCAL_CODE_DIR, _CONTAINER_CODE_DIR):
+    if _code_dir.exists() and str(_code_dir) not in sys.path:
+        sys.path.insert(0, str(_code_dir))
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
@@ -10,9 +19,17 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch.substitutions import Command
 from ament_index_python.packages import get_package_share_directory
+from pnc_rc.frenet.preset import FRENET_LAUNCH_ARGUMENT_DEFAULTS
+from pnc_rc.frenet.preset import FRENET_NODE_PARAM_MAP
 
 
 def generate_launch_description():
+    """创建仿真、全局规划、Frenet 局部规划、LQR 和 RViz 的 launch 描述。
+
+    Returns:
+        `LaunchDescription`。Frenet 相关参数通过 `FRENET_LAUNCH_ARGUMENT_DEFAULTS`
+        和 `FRENET_NODE_PARAM_MAP` 统一声明并转发。
+    """
     pkg_share = get_package_share_directory('f1tenth_gym_ros')
     sim_config = os.path.join(pkg_share, 'config', 'sim.yaml')
     code_dir = '/sim_ws/src/f1tenth_gym_ros/code'
@@ -70,62 +87,10 @@ def generate_launch_description():
         DeclareLaunchArgument('error_filter_alpha_y', default_value='0.30'),
         DeclareLaunchArgument('error_filter_alpha_psi', default_value='0.25'),
         DeclareLaunchArgument('enable_frenet_planner', default_value='false'),
-        DeclareLaunchArgument('frenet_publish_rate_hz', default_value='20.0'),
-        DeclareLaunchArgument('frenet_target_speed', default_value='1.5'),
-        DeclareLaunchArgument('frenet_v_min', default_value='0.6'),
-        DeclareLaunchArgument('frenet_v_max', default_value='2.5'),
-        DeclareLaunchArgument('frenet_v_step', default_value='0.3'),
-        DeclareLaunchArgument('frenet_t_min', default_value='2.0'),
-        DeclareLaunchArgument('frenet_t_max', default_value='3.0'),
-        DeclareLaunchArgument('frenet_t_step', default_value='0.5'),
-        DeclareLaunchArgument('frenet_d_min', default_value='-1.8'),
-        DeclareLaunchArgument('frenet_d_max', default_value='1.8'),
-        DeclareLaunchArgument('frenet_d_step', default_value='0.1'),
-        DeclareLaunchArgument('frenet_trajectory_dt', default_value='0.1'),
-        DeclareLaunchArgument('frenet_max_curvature', default_value='1.1'),
-        DeclareLaunchArgument('frenet_safe_clearance_m', default_value='0.35'),
-        DeclareLaunchArgument('frenet_min_clearance_m', default_value='0.05'),
-        DeclareLaunchArgument('frenet_corridor_radius_m', default_value='0.14'),
-        DeclareLaunchArgument('frenet_corridor_sample_step_m', default_value='0.10'),
-        DeclareLaunchArgument('frenet_path_collision_sample_step_m', default_value='0.05'),
-        DeclareLaunchArgument('frenet_footprint_front_m', default_value='0.38'),
-        DeclareLaunchArgument('frenet_footprint_rear_m', default_value='0.05'),
-        DeclareLaunchArgument('frenet_max_heading_jump', default_value='0.85'),
-        DeclareLaunchArgument('frenet_min_progress_step_m', default_value='0.20'),
-        DeclareLaunchArgument('frenet_reuse_last_candidate_timeout_s', default_value='1.0'),
-        DeclareLaunchArgument('frenet_max_held_path_age_s', default_value='0.45'),
-        DeclareLaunchArgument('frenet_held_path_replan_clearance_m', default_value='0.22'),
-        DeclareLaunchArgument('frenet_held_path_min_remaining_m', default_value='2.0'),
-        DeclareLaunchArgument('frenet_candidate_lateral_consistency_weight', default_value='8.0'),
-        DeclareLaunchArgument('frenet_candidate_side_switch_penalty', default_value='25.0'),
-        DeclareLaunchArgument('frenet_candidate_side_deadband_m', default_value='0.20'),
-        DeclareLaunchArgument('frenet_projection_search_window_m', default_value='6.0'),
-        DeclareLaunchArgument('frenet_stop_path_length_m', default_value='0.25'),
-        DeclareLaunchArgument('frenet_min_published_path_length_m', default_value='0.75'),
-        DeclareLaunchArgument('frenet_published_path_lookahead_m', default_value='0.25'),
-        DeclareLaunchArgument('frenet_min_path_publish_interval_s', default_value='0.25'),
-        DeclareLaunchArgument('frenet_path_republish_distance_m', default_value='0.50'),
-        DeclareLaunchArgument('frenet_path_republish_min_remaining_m', default_value='2.0'),
-        DeclareLaunchArgument('frenet_centerline_return_lookahead_m', default_value='5.0'),
-        DeclareLaunchArgument('frenet_centerline_return_step_m', default_value='0.08'),
-        DeclareLaunchArgument('frenet_centerline_threat_corridor_radius_m', default_value='0.32'),
-        DeclareLaunchArgument('frenet_centerline_threat_lookahead_m', default_value='6.0'),
-        DeclareLaunchArgument('frenet_reference_closed_loop', default_value='true'),
-        DeclareLaunchArgument('frenet_activation_min_lookahead_m', default_value='3.0'),
-        DeclareLaunchArgument('frenet_activation_max_lookahead_m', default_value='8.0'),
-        DeclareLaunchArgument('frenet_activation_base_lookahead_m', default_value='2.2'),
-        DeclareLaunchArgument('frenet_activation_reaction_time_s', default_value='1.0'),
-        DeclareLaunchArgument('frenet_activation_decel_mps2', default_value='2.0'),
-        DeclareLaunchArgument('frenet_approach_slowdown_extra_m', default_value='-1.0'),
-        DeclareLaunchArgument('frenet_max_observed_speed_mps', default_value='0.0'),
-        DeclareLaunchArgument('frenet_centerline_speed_limit_mps', default_value='-1.0'),
-        DeclareLaunchArgument('frenet_avoidance_speed_limit_mps', default_value='0.75'),
-        DeclareLaunchArgument('frenet_stop_speed_limit_mps', default_value='0.0'),
-        DeclareLaunchArgument('frenet_grid_inflation_radius_m', default_value='0.28'),
-        DeclareLaunchArgument('frenet_grid_resolution_m', default_value='0.05'),
-        DeclareLaunchArgument('frenet_grid_forward_m', default_value='10.0'),
-        DeclareLaunchArgument('frenet_grid_rear_m', default_value='1.0'),
-        DeclareLaunchArgument('frenet_grid_half_width_m', default_value='3.0'),
+        *[
+            DeclareLaunchArgument(name, default_value=default_value)
+            for name, default_value in FRENET_LAUNCH_ARGUMENT_DEFAULTS
+        ],
         DeclareLaunchArgument('trajectory_mode', default_value='control_friendly'),
         DeclareLaunchArgument('control_friendly_alpha', default_value='0.56'),
         DeclareLaunchArgument('control_friendly_auto_alpha', default_value='true'),
@@ -189,6 +154,14 @@ def generate_launch_description():
     from launch.actions import OpaqueFunction
 
     def create_bridge_node(context):
+        """按 launch 参数重写 gym bridge 临时配置。
+
+        Args:
+            context: ROS 2 launch 运行时上下文。
+
+        Returns:
+            包含一个 `gym_bridge` Node action 的列表。
+        """
         map_path = LaunchConfiguration('map_path').perform(context)
         map_img_ext = LaunchConfiguration('map_img_ext').perform(context)
         sx = float(LaunchConfiguration('sx').perform(context))
@@ -217,6 +190,15 @@ def generate_launch_description():
         ]
 
     def launch_pnc_nodes(context):
+        """在运行时解析参数并创建 planner/Frenet/LQR 进程。
+
+        Args:
+            context: ROS 2 launch 运行时上下文。
+
+        Returns:
+            `ExecuteProcess` 列表。`enable_frenet_planner=true` 时会把 LQR 输入
+            切换到 `/local_trajectory` 并附加 Frenet planner 进程。
+        """
         target_speed = LaunchConfiguration('target_speed').perform(context)
         min_speed = LaunchConfiguration('min_speed').perform(context)
         q_lat = LaunchConfiguration('lqr_q_lateral').perform(context)
@@ -255,120 +237,16 @@ def generate_launch_description():
         error_alpha_y = LaunchConfiguration('error_filter_alpha_y').perform(context)
         error_alpha_psi = LaunchConfiguration('error_filter_alpha_psi').perform(context)
         enable_frenet = LaunchConfiguration('enable_frenet_planner').perform(context)
-        frenet_rate = LaunchConfiguration('frenet_publish_rate_hz').perform(context)
-        frenet_target_speed = LaunchConfiguration('frenet_target_speed').perform(context)
-        frenet_v_min = LaunchConfiguration('frenet_v_min').perform(context)
-        frenet_v_max = LaunchConfiguration('frenet_v_max').perform(context)
-        frenet_v_step = LaunchConfiguration('frenet_v_step').perform(context)
-        frenet_t_min = LaunchConfiguration('frenet_t_min').perform(context)
-        frenet_t_max = LaunchConfiguration('frenet_t_max').perform(context)
-        frenet_t_step = LaunchConfiguration('frenet_t_step').perform(context)
-        frenet_d_min = LaunchConfiguration('frenet_d_min').perform(context)
-        frenet_d_max = LaunchConfiguration('frenet_d_max').perform(context)
-        frenet_d_step = LaunchConfiguration('frenet_d_step').perform(context)
-        frenet_trajectory_dt = LaunchConfiguration('frenet_trajectory_dt').perform(context)
-        frenet_max_curvature = LaunchConfiguration('frenet_max_curvature').perform(context)
-        frenet_safe_clearance = LaunchConfiguration('frenet_safe_clearance_m').perform(context)
-        frenet_min_clearance = LaunchConfiguration('frenet_min_clearance_m').perform(context)
-        frenet_corridor_radius = LaunchConfiguration('frenet_corridor_radius_m').perform(context)
-        frenet_corridor_sample_step = LaunchConfiguration(
-            'frenet_corridor_sample_step_m'
-        ).perform(context)
-        frenet_path_collision_sample_step = LaunchConfiguration(
-            'frenet_path_collision_sample_step_m'
-        ).perform(context)
-        frenet_footprint_front = LaunchConfiguration('frenet_footprint_front_m').perform(context)
-        frenet_footprint_rear = LaunchConfiguration('frenet_footprint_rear_m').perform(context)
-        frenet_max_heading_jump = LaunchConfiguration('frenet_max_heading_jump').perform(context)
-        frenet_min_progress_step = LaunchConfiguration('frenet_min_progress_step_m').perform(context)
-        frenet_reuse_timeout = LaunchConfiguration('frenet_reuse_last_candidate_timeout_s').perform(context)
-        frenet_max_hold_age = LaunchConfiguration(
-            'frenet_max_held_path_age_s'
-        ).perform(context)
-        frenet_hold_replan_clearance = LaunchConfiguration(
-            'frenet_held_path_replan_clearance_m'
-        ).perform(context)
-        frenet_hold_min_remaining = LaunchConfiguration(
-            'frenet_held_path_min_remaining_m'
-        ).perform(context)
-        frenet_candidate_consistency_weight = LaunchConfiguration(
-            'frenet_candidate_lateral_consistency_weight'
-        ).perform(context)
-        frenet_candidate_side_switch_penalty = LaunchConfiguration(
-            'frenet_candidate_side_switch_penalty'
-        ).perform(context)
-        frenet_candidate_side_deadband = LaunchConfiguration(
-            'frenet_candidate_side_deadband_m'
-        ).perform(context)
-        frenet_projection_search_window = LaunchConfiguration(
-            'frenet_projection_search_window_m'
-        ).perform(context)
-        frenet_stop_path_length = LaunchConfiguration('frenet_stop_path_length_m').perform(context)
-        frenet_min_published_path_length = LaunchConfiguration(
-            'frenet_min_published_path_length_m'
-        ).perform(context)
-        frenet_published_path_lookahead = LaunchConfiguration(
-            'frenet_published_path_lookahead_m'
-        ).perform(context)
-        frenet_min_path_publish_interval = LaunchConfiguration(
-            'frenet_min_path_publish_interval_s'
-        ).perform(context)
-        frenet_path_republish_distance = LaunchConfiguration(
-            'frenet_path_republish_distance_m'
-        ).perform(context)
-        frenet_path_republish_min_remaining = LaunchConfiguration(
-            'frenet_path_republish_min_remaining_m'
-        ).perform(context)
-        frenet_centerline_return_lookahead = LaunchConfiguration(
-            'frenet_centerline_return_lookahead_m'
-        ).perform(context)
-        frenet_centerline_return_step = LaunchConfiguration(
-            'frenet_centerline_return_step_m'
-        ).perform(context)
-        frenet_centerline_threat_corridor_radius = LaunchConfiguration(
-            'frenet_centerline_threat_corridor_radius_m'
-        ).perform(context)
-        frenet_centerline_threat_lookahead = LaunchConfiguration(
-            'frenet_centerline_threat_lookahead_m'
-        ).perform(context)
-        frenet_reference_closed_loop = LaunchConfiguration(
-            'frenet_reference_closed_loop'
-        ).perform(context)
-        frenet_activation_min_lookahead = LaunchConfiguration(
-            'frenet_activation_min_lookahead_m'
-        ).perform(context)
-        frenet_activation_max_lookahead = LaunchConfiguration(
-            'frenet_activation_max_lookahead_m'
-        ).perform(context)
-        frenet_activation_base_lookahead = LaunchConfiguration(
-            'frenet_activation_base_lookahead_m'
-        ).perform(context)
-        frenet_activation_reaction_time = LaunchConfiguration(
-            'frenet_activation_reaction_time_s'
-        ).perform(context)
-        frenet_activation_decel = LaunchConfiguration(
-            'frenet_activation_decel_mps2'
-        ).perform(context)
-        frenet_approach_slowdown_extra = LaunchConfiguration(
-            'frenet_approach_slowdown_extra_m'
-        ).perform(context)
-        frenet_max_observed_speed = LaunchConfiguration(
-            'frenet_max_observed_speed_mps'
-        ).perform(context)
-        frenet_centerline_speed_limit = LaunchConfiguration(
-            'frenet_centerline_speed_limit_mps'
-        ).perform(context)
-        frenet_avoidance_speed_limit = LaunchConfiguration(
-            'frenet_avoidance_speed_limit_mps'
-        ).perform(context)
-        frenet_stop_speed_limit = LaunchConfiguration(
-            'frenet_stop_speed_limit_mps'
-        ).perform(context)
-        frenet_inflation = LaunchConfiguration('frenet_grid_inflation_radius_m').perform(context)
-        frenet_resolution = LaunchConfiguration('frenet_grid_resolution_m').perform(context)
-        frenet_grid_forward = LaunchConfiguration('frenet_grid_forward_m').perform(context)
-        frenet_grid_rear = LaunchConfiguration('frenet_grid_rear_m').perform(context)
-        frenet_grid_half_width = LaunchConfiguration('frenet_grid_half_width_m').perform(context)
+        frenet_values = {
+            name: LaunchConfiguration(name).perform(context)
+            for name, _ in FRENET_LAUNCH_ARGUMENT_DEFAULTS
+        }
+        frenet_param_args = []
+        for node_param, launch_arg in FRENET_NODE_PARAM_MAP:
+            frenet_param_args.extend([
+                '-p',
+                f'{node_param}:={frenet_values[launch_arg]}',
+            ])
         traj_mode = LaunchConfiguration('trajectory_mode').perform(context)
         cf_alpha = LaunchConfiguration('control_friendly_alpha').perform(context)
         cf_auto = LaunchConfiguration('control_friendly_auto_alpha').perform(context)
@@ -416,63 +294,8 @@ def generate_launch_description():
                 '-p', 'scan_topic:=/scan',
                 '-p', 'map_topic:=/map',
                 '-p', 'frame_id:=map',
-                '-p', f'publish_rate_hz:={frenet_rate}',
-                '-p', f'target_speed:={frenet_target_speed}',
-                '-p', f'v_min:={frenet_v_min}',
-                '-p', f'v_max:={frenet_v_max}',
-                '-p', f'v_step:={frenet_v_step}',
-                '-p', f't_min:={frenet_t_min}',
-                '-p', f't_max:={frenet_t_max}',
-                '-p', f't_step:={frenet_t_step}',
-                '-p', f'd_min:={frenet_d_min}',
-                '-p', f'd_max:={frenet_d_max}',
-                '-p', f'd_step:={frenet_d_step}',
-                '-p', f'trajectory_dt:={frenet_trajectory_dt}',
-                '-p', f'max_curvature:={frenet_max_curvature}',
-                '-p', f'safe_clearance_m:={frenet_safe_clearance}',
-                '-p', f'min_clearance_m:={frenet_min_clearance}',
-                '-p', f'corridor_radius_m:={frenet_corridor_radius}',
-                '-p', f'corridor_sample_step_m:={frenet_corridor_sample_step}',
-                '-p', f'path_collision_sample_step_m:={frenet_path_collision_sample_step}',
-                '-p', f'footprint_front_m:={frenet_footprint_front}',
-                '-p', f'footprint_rear_m:={frenet_footprint_rear}',
-                '-p', f'max_heading_jump:={frenet_max_heading_jump}',
-                '-p', f'min_progress_step_m:={frenet_min_progress_step}',
-                '-p', f'reuse_last_candidate_timeout_s:={frenet_reuse_timeout}',
-                '-p', f'max_held_path_age_s:={frenet_max_hold_age}',
-                '-p', f'held_path_replan_clearance_m:={frenet_hold_replan_clearance}',
-                '-p', f'held_path_min_remaining_m:={frenet_hold_min_remaining}',
-                '-p', f'candidate_lateral_consistency_weight:={frenet_candidate_consistency_weight}',
-                '-p', f'candidate_side_switch_penalty:={frenet_candidate_side_switch_penalty}',
-                '-p', f'candidate_side_deadband_m:={frenet_candidate_side_deadband}',
-                '-p', f'projection_search_window_m:={frenet_projection_search_window}',
-                '-p', f'stop_path_length_m:={frenet_stop_path_length}',
-                '-p', f'min_published_path_length_m:={frenet_min_published_path_length}',
-                '-p', f'published_path_lookahead_m:={frenet_published_path_lookahead}',
-                '-p', f'min_path_publish_interval_s:={frenet_min_path_publish_interval}',
-                '-p', f'path_republish_distance_m:={frenet_path_republish_distance}',
-                '-p', f'path_republish_min_remaining_m:={frenet_path_republish_min_remaining}',
-                '-p', f'centerline_return_lookahead_m:={frenet_centerline_return_lookahead}',
-                '-p', f'centerline_return_step_m:={frenet_centerline_return_step}',
-                '-p', f'centerline_threat_corridor_radius_m:={frenet_centerline_threat_corridor_radius}',
-                '-p', f'centerline_threat_lookahead_m:={frenet_centerline_threat_lookahead}',
-                '-p', f'reference_closed_loop:={frenet_reference_closed_loop}',
+                *frenet_param_args,
                 '-p', f'cruise_speed_mps:={target_speed}',
-                '-p', f'activation_min_lookahead_m:={frenet_activation_min_lookahead}',
-                '-p', f'activation_max_lookahead_m:={frenet_activation_max_lookahead}',
-                '-p', f'activation_base_lookahead_m:={frenet_activation_base_lookahead}',
-                '-p', f'activation_reaction_time_s:={frenet_activation_reaction_time}',
-                '-p', f'activation_decel_mps2:={frenet_activation_decel}',
-                '-p', f'approach_slowdown_extra_m:={frenet_approach_slowdown_extra}',
-                '-p', f'max_observed_speed_mps:={frenet_max_observed_speed}',
-                '-p', f'centerline_speed_limit_mps:={frenet_centerline_speed_limit}',
-                '-p', f'avoidance_speed_limit_mps:={frenet_avoidance_speed_limit}',
-                '-p', f'stop_speed_limit_mps:={frenet_stop_speed_limit}',
-                '-p', f'grid_inflation_radius_m:={frenet_inflation}',
-                '-p', f'grid_resolution_m:={frenet_resolution}',
-                '-p', f'grid_forward_m:={frenet_grid_forward}',
-                '-p', f'grid_rear_m:={frenet_grid_rear}',
-                '-p', f'grid_half_width_m:={frenet_grid_half_width}',
             ],
             output='screen',
         )

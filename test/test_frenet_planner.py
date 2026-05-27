@@ -7,12 +7,14 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
 from pnc_rc.frenet.planner import (
+    CandidatePath,
     FrenetPlanStats,
     FrenetPlannerConfig,
     FrenetState,
     LocalGridConfig,
     ReferencePath,
     build_occupancy_grid,
+    curvature_smoothness_cost,
     densify_path_points,
     estimate_heading_jumps,
     estimate_open_path_curvature,
@@ -20,13 +22,19 @@ from pnc_rc.frenet.planner import (
     evaluate_quintic,
     initial_frenet_state,
     local_static_map_occupancy,
+    path_pose_error,
     plan_frenet_path,
+    polyline_length,
     sample_reference_segment,
+    sample_return_to_centerline_segment,
+    score_candidate,
+    select_temporally_consistent_candidate,
     solve_quartic_longitudinal,
     solve_quintic_lateral,
     speed_based_activation_lookahead,
     swept_corridor_points,
     trim_path_to_position,
+    truncate_path_length,
     _forward_progress_planning_state,
 )
 
@@ -66,7 +74,7 @@ def test_quartic_longitudinal_uses_initial_acceleration():
     assert abs(s_ddotf[0]) < 1e-9
 
 
-def test_forward_progress_planning_state_filters_noisy_acceleration():
+def test_forward_progress_planning_state_preserves_plausible_braking():
     noisy_accel = FrenetState(
         s=2.0,
         d=0.1,
@@ -83,9 +91,22 @@ def test_forward_progress_planning_state_filters_noisy_acceleration():
         s_ddot=-0.5,
         d_ddot=0.0,
     )
+    strong_accel = FrenetState(
+        s=2.0,
+        d=0.1,
+        s_dot=0.8,
+        d_dot=0.0,
+        s_ddot=2.5,
+        d_ddot=0.0,
+    )
+    config = FrenetPlannerConfig(
+        max_initial_s_accel_mps2=2.0,
+        max_reliable_initial_s_accel_mps2=3.0,
+    )
 
-    assert _forward_progress_planning_state(noisy_accel).s_ddot == 0.0
-    assert _forward_progress_planning_state(noisy_brake).s_ddot == 0.0
+    assert _forward_progress_planning_state(noisy_accel, config).s_ddot == 0.0
+    assert _forward_progress_planning_state(noisy_brake, config).s_ddot == -0.5
+    assert _forward_progress_planning_state(strong_accel, config).s_ddot == 2.0
 
 
 def test_speed_based_activation_lookahead_scales_with_speed():
@@ -528,6 +549,28 @@ def test_trim_path_to_position_can_advance_anchor_ahead_of_vehicle():
     assert np.isclose(trimmed[0, 1], 0.0, atol=1e-6)
 
 
+def test_trim_path_to_position_can_cap_remaining_length():
+    points = np.array([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]], dtype=float)
+
+    trimmed = trim_path_to_position(
+        points,
+        np.array([0.0, 0.0]),
+        max_remaining_length_m=2.5,
+    )
+
+    assert np.allclose(trimmed[0], [0.0, 0.0])
+    assert np.allclose(trimmed[-1], [2.5, 0.0])
+    assert np.isclose(polyline_length(trimmed), 2.5)
+
+
+def test_truncate_path_length_keeps_short_paths_unchanged():
+    points = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+
+    truncated = truncate_path_length(points, 2.0)
+
+    assert np.allclose(truncated, points)
+
+
 def test_sample_reference_segment_returns_centerline_ahead():
     points = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], dtype=float)
     reference = ReferencePath.from_points(points, closed_loop=False)
@@ -537,6 +580,32 @@ def test_sample_reference_segment_returns_centerline_ahead():
     assert np.allclose(segment[0], [0.5, 0.0])
     assert np.allclose(segment[-1], [1.5, 0.0])
     assert len(segment) == 5
+
+
+def test_sample_return_to_centerline_segment_starts_at_current_lateral_offset():
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], dtype=float)
+    reference = ReferencePath.from_points(points, closed_loop=False)
+
+    segment = sample_return_to_centerline_segment(
+        reference,
+        start_s=0.5,
+        start_d=0.6,
+        length_m=1.0,
+        step_m=0.25,
+    )
+
+    assert np.allclose(segment[0], [0.5, 0.6])
+    assert abs(segment[-1, 1]) < 1e-9
+    assert np.all(np.diff(segment[:, 1]) <= 1e-9)
+
+
+def test_path_pose_error_detects_stale_path_lateral_offset_and_heading():
+    path = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=float)
+
+    distance, heading_error = path_pose_error(path, np.array([0.5, 0.6]), math.pi / 2.0)
+
+    assert np.isclose(distance, 0.6, atol=1e-6)
+    assert np.isclose(heading_error, math.pi / 2.0, atol=1e-6)
 
 
 def test_occupancy_grid_corridor_detects_vehicle_width_collision():
@@ -702,6 +771,229 @@ def test_planner_hard_rejects_low_clearance_candidate():
 
     assert candidate is None
     assert stats.clearance_rejections > 0
+
+
+def test_candidate_score_prefers_higher_clearance():
+    xy = np.column_stack([np.linspace(0.0, 2.0, 20), np.zeros(20)])
+    s_values = np.linspace(0.0, 2.0, 20)
+    d_values = np.zeros(20)
+    s_dot_values = np.full(20, 1.0)
+    d_dot_values = np.zeros(20)
+    jerks = np.zeros(20)
+    config = FrenetPlannerConfig(
+        target_speed=1.0,
+        safe_clearance=0.35,
+        min_clearance_m=0.05,
+        weight_obstacle_clearance=24.0,
+    )
+
+    low_clearance = score_candidate(
+        xy,
+        s_values,
+        d_values,
+        s_dot_values,
+        d_dot_values,
+        jerks,
+        jerks,
+        duration=2.0,
+        min_clearance=0.08,
+        config=config,
+    )
+    high_clearance = score_candidate(
+        xy,
+        s_values,
+        d_values,
+        s_dot_values,
+        d_dot_values,
+        jerks,
+        jerks,
+        duration=2.0,
+        min_clearance=0.32,
+        config=config,
+    )
+
+    assert low_clearance.cost > high_clearance.cost
+
+
+def test_candidate_score_prefers_smoother_curvature_profile_when_safe():
+    path_x = np.linspace(0.0, 4.0, 60)
+    smooth_xy = np.column_stack([path_x, 0.35 * np.sin(np.linspace(0.0, math.pi, 60))])
+    wavy_xy = np.column_stack(
+        [path_x, 0.35 * np.sin(np.linspace(0.0, math.pi, 60)) + 0.08 * np.sin(np.linspace(0.0, 8.0 * math.pi, 60))]
+    )
+    s_values = np.linspace(0.0, 4.0, 60)
+    d_values = np.zeros(60)
+    s_dot_values = np.full(60, 1.0)
+    d_dot_values = np.zeros(60)
+    jerks = np.zeros(60)
+    config = FrenetPlannerConfig(
+        target_speed=1.0,
+        weight_curvature=0.0,
+        weight_curvature_rate=8.0,
+        weight_obstacle_clearance=0.0,
+    )
+
+    smooth = score_candidate(
+        smooth_xy,
+        s_values,
+        d_values,
+        s_dot_values,
+        d_dot_values,
+        jerks,
+        jerks,
+        duration=2.0,
+        min_clearance=0.35,
+        config=config,
+    )
+    wavy = score_candidate(
+        wavy_xy,
+        s_values,
+        d_values,
+        s_dot_values,
+        d_dot_values,
+        jerks,
+        jerks,
+        duration=2.0,
+        min_clearance=0.35,
+        config=config,
+    )
+
+    assert curvature_smoothness_cost(wavy_xy, np.array([])) > curvature_smoothness_cost(
+        smooth_xy,
+        np.array([]),
+    )
+    assert wavy.cost > smooth.cost
+
+
+def _candidate_with_d(
+    d_final: float,
+    cost: float,
+    clearance: float,
+    d_profile=None,
+    s_profile=None,
+) -> CandidatePath:
+    d = (
+        np.asarray(d_profile, dtype=float)
+        if d_profile is not None
+        else np.array([0.0, d_final], dtype=float)
+    )
+    s = (
+        np.asarray(s_profile, dtype=float)
+        if s_profile is not None
+        else np.linspace(0.0, 1.0, len(d))
+    )
+    return CandidatePath(
+        xy=np.zeros((len(d), 2), dtype=float),
+        s=s,
+        d=d,
+        s_dot=np.ones(len(d), dtype=float),
+        d_dot=np.zeros(len(d), dtype=float),
+        cost=cost,
+        min_clearance_m=clearance,
+        max_curvature=0.0,
+    )
+
+
+def test_temporal_selection_uses_profile_continuity():
+    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
+    raw_best = _candidate_with_d(
+        1.4,
+        cost=1.0,
+        clearance=0.35,
+        s_profile=previous_s,
+        d_profile=np.array([0.35, 0.9, 1.2, 1.4], dtype=float),
+    )
+    same_channel = _candidate_with_d(
+        0.52,
+        cost=4.0,
+        clearance=0.34,
+        s_profile=previous_s,
+        d_profile=np.array([0.34, 0.43, 0.48, 0.52], dtype=float),
+    )
+
+    selected, reason = select_temporally_consistent_candidate(
+        raw_best,
+        [raw_best, same_channel],
+        previous_s_profile=previous_s,
+        previous_d_profile=previous_d,
+        profile_consistency_weight=20.0,
+        profile_max_jump_m=0.35,
+        profile_lookahead_m=3.0,
+        profile_unlock_clearance_gain_m=0.12,
+        safe_clearance_m=0.30,
+    )
+
+    assert selected is same_channel
+    assert reason == "same_profile"
+
+
+def test_temporal_selection_unlocks_for_clearance_gain():
+    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
+    safer_jump = _candidate_with_d(
+        1.4,
+        cost=1.0,
+        clearance=0.50,
+        s_profile=previous_s,
+        d_profile=np.array([0.35, 0.9, 1.2, 1.4], dtype=float),
+    )
+    same_channel = _candidate_with_d(
+        0.52,
+        cost=4.0,
+        clearance=0.32,
+        s_profile=previous_s,
+        d_profile=np.array([0.34, 0.43, 0.48, 0.52], dtype=float),
+    )
+
+    selected, reason = select_temporally_consistent_candidate(
+        safer_jump,
+        [safer_jump, same_channel],
+        previous_s_profile=previous_s,
+        previous_d_profile=previous_d,
+        profile_consistency_weight=20.0,
+        profile_max_jump_m=0.35,
+        profile_lookahead_m=3.0,
+        profile_unlock_clearance_gain_m=0.12,
+        safe_clearance_m=0.30,
+    )
+
+    assert selected is safer_jump
+    assert reason == "higher_clearance"
+
+
+def test_temporal_selection_keeps_raw_best_when_raw_cost_gap_is_too_high():
+    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
+    raw_best = _candidate_with_d(
+        1.4,
+        cost=1.0,
+        clearance=0.34,
+        s_profile=previous_s,
+        d_profile=np.array([0.35, 0.95, 1.2, 1.4], dtype=float),
+    )
+    smaller_jump = _candidate_with_d(
+        0.85,
+        cost=5.0,
+        clearance=0.33,
+        s_profile=previous_s,
+        d_profile=np.array([0.35, 0.72, 0.78, 0.85], dtype=float),
+    )
+
+    selected, reason = select_temporally_consistent_candidate(
+        raw_best,
+        [raw_best, smaller_jump],
+        previous_s_profile=previous_s,
+        previous_d_profile=previous_d,
+        profile_consistency_weight=20.0,
+        profile_max_jump_m=0.25,
+        profile_lookahead_m=3.0,
+        profile_unlock_clearance_gain_m=0.12,
+        safe_clearance_m=0.30,
+    )
+
+    assert selected is raw_best
+    assert reason == "lower_cost"
 
 
 def test_reference_path_open_mode_does_not_wrap_at_endpoint():

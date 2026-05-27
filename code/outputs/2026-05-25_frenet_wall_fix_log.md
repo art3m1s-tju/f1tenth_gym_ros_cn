@@ -1070,3 +1070,575 @@ success_rate: 1.000
 ```text
 ./run_frenet_random_obstacle_robustness.sh --trials 10 --laps 3 --timeout 240 --target-speed 3.0 --avoidance-speed 1.2
 ```
+
+## 2026-05-26 更新：随机障碍 RViz 单 seed 复现模式
+
+随机障碍鲁棒性脚本新增可视化入口，用于把批量测试中的某个 seed 直接放到 RViz 中观察候选轨迹、最优轨迹和车辆行为：
+
+```text
+./run_frenet_random_obstacle_robustness.sh --rviz --seed 0 --target-speed 3.0 --avoidance-speed 1.2
+```
+
+实现要点：
+
+- `run_frenet_random_obstacle_robustness.sh` 新增 `--rviz` 和 `--seed` 参数；
+- RViz 模式自动挂载 X11：`DISPLAY`、`QT_X11_NO_MITSHM`、`/tmp/.X11-unix`；
+- RViz 模式只生成并启动一个 seed，不跑批量评分，也跳过 pytest 以减少等待；
+- Python runner 新增 `--mode rviz`，复用批量测试同一套 Frenet preset、地图生成和 launch 参数；
+- `build_launch_cmd()` 支持 `enable_rviz:=true/false`，避免 shell 里复制第二套 launch 参数。
+
+验证：
+
+```text
+bash -n run_frenet_random_obstacle_robustness.sh
+python3 -m py_compile code/lqr_sweep/frenet_random_robustness.py
+python3 -m pytest test/test_frenet_planner.py test/test_frenet_random_robustness.py -q
+34 passed
+```
+
+## 2026-05-26 更新：提前预激活 Frenet 避障
+
+问题现象：RViz 中候选轨迹束偶尔到障碍物较近时才出现，小车在第一障碍物前仍可能短暂停住。原因是旧逻辑把 `activation_lookahead` 同时作为威胁检测和真正切入 Frenet 的边界；`approach` 区间只发布中心线并限速，不会提前生成绕障轨迹。
+
+改动：
+
+- `threat_lookahead` 改为覆盖 `slowdown_lookahead = activation_lookahead + approach_extra`；
+- 当障碍物进入 `slowdown_lookahead` 后立即尝试 Frenet 规划并发布候选轨迹；
+- 若仍在预激活区间且当前帧无 safe candidate，不直接发布 stop path，而是继续发布 approach 中心线路径并保持 avoidance speed，等待下一帧重试；
+- 真正进入 `activation_lookahead` 后若仍无解，才进入 stop/reuse 保护逻辑；
+- 3.0m/s preset 的 `approach_extra` 从 2.25m 调整为 3.0m，候选轨迹束预计从约 8.05m 提前到约 11.05m 左右出现；低速 0.5-1.0m/s 只额外提前约 0.75m。
+
+验证：
+
+```text
+python3 -m py_compile code/pnc_rc/frenet/node.py code/pnc_rc/frenet/planner.py code/lqr_sweep/frenet_random_robustness.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+34 passed
+```
+
+## 2026-05-26 更新：候选轨迹选择安全裕度保护
+
+观察：RViz 中有时 best candidate 看起来安全裕度不大。复查后发现问题不在 hard collision check，而在 safe candidates 之间的二次选择：
+
+- `min_clearance_m` 只是硬拒绝阈值，过线后仍可能作为 safe candidate；
+- 原始 cost 已包含 clearance deficit，但权重不能无限加大，否则会为了远离障碍选择过大横向偏移，反而靠近赛道边界或造成跟踪不稳；
+- 防蛇形的 temporal consistency 逻辑只看横向连续性，之前可能从 raw best 切到 cost 明显更差的同侧候选，例如历史日志中出现过 `raw_cost=2.97`、`selected_cost=8.44`；
+- 之前选择日志没有输出 raw/selected clearance，不方便判断是不是为了稳定性牺牲了安全裕度。
+
+改动：
+
+- 保留原始 clearance cost 公式，不做全局激进加权，避免把车推向赛道边界；
+- temporal consistency 只允许在候选成本接近时覆盖 raw best：如果 `selected_cost - raw_cost > 3.0`，保留 raw best；
+- 如果 temporal candidate 比 raw best 少了超过 0.08m clearance，且 selected clearance 低于 `safe_clearance_m`，保留 raw best；
+- 选择日志新增 `raw_clearance` 和 `selected_clearance`，以后可以直接从 launch log 判断是否因为防蛇形而牺牲了安全裕度。
+
+验证：
+
+```text
+python3 -m py_compile code/pnc_rc/frenet/node.py code/pnc_rc/frenet/planner.py
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+35 passed
+```
+
+补充：尝试过把 clearance cost 做归一化强惩罚，但 seed 0 smoke 会失败，说明单纯“越远越好”不是正确方向。候选安全性应该通过 hard check、clearance-aware override guard 和赛道边界约束共同保证，而不是只拉大障碍 clearance 权重。
+
+## 2026-05-26 更新：同侧候选硬锁定
+
+问题：仅靠 `candidate_side_switch_penalty` 仍然是 soft cost，另一侧候选如果 raw cost 更低，可能压过上一侧候选，表现为小车在左右两侧反复切换。
+
+改动：
+
+- 新增 `select_side_consistent_candidate()` 纯函数；
+- 如果上一条已选候选在左侧/右侧，且同侧仍存在 safe candidate，优先只在同侧候选集合内选最优；
+- 只有上一侧没有 safe candidate，或上一侧候选相对 raw best 损失超过 0.08m clearance 且低于 `safe_clearance_m`，才允许切到另一侧；
+- 保留原有 temporal cost 作为同侧集合内部排序依据，而不是作为跨侧切换依据；
+- RViz/日志中会输出 `reason=same_side`，便于确认当前是同侧锁定而不是普通 cost 选择。
+
+验证：
+
+```text
+python3 -m py_compile code/pnc_rc/frenet/planner.py code/pnc_rc/frenet/node.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+37 passed
+```
+
+## 2026-05-26 更新：同侧锁定改为整条轨迹主导侧
+
+继续观察 RViz 后发现，仅用 `d[-1]` 判断左右侧仍不充分。原因是 RViz 展示的是整条候选轨迹形状，而不是终点；一条轨迹可能中段先跨到另一侧，最后终点又回到上一侧，旧逻辑仍会把它误判为同侧，表现上仍然蛇形。
+
+改动：
+
+- 新增 `candidate_path_side()`，用整条 `d(t)` 的主导侧判断候选轨迹侧别；
+- 如果轨迹在两侧都有明显横向偏移，则归为中性，不参与“同侧候选集合”；
+- Frenet node 新增 `last_selected_candidate_side`，记录上一条被选中轨迹的主导侧，而不是只记录 `d_final`；
+- 同侧锁定现在筛选的是“整条轨迹主导侧一致”的候选，避免终点同侧但中段跨侧的候选被选中；
+- 新增测试覆盖：纯左/纯右轨迹分类、跨两侧轨迹分类、终点同侧但中段跨侧时不作为同侧候选。
+
+验证：
+
+```text
+python3 -m py_compile code/pnc_rc/frenet/planner.py code/pnc_rc/frenet/node.py
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+39 passed
+```
+
+## 2026-05-26 更新：review 结论补齐
+
+目标：把 subagent review 中剩余的参数冗余、测试 launch 参数重复和注释不够详细继续收敛。
+
+改动：
+
+- `FRENET_NODE_DEFAULTS`、`FRENET_LAUNCH_ARGUMENT_DEFAULTS`、`FRENET_NODE_PARAM_MAP` 统一搬到 `code/pnc_rc/frenet/preset.py`；
+- `node.py` 不再手写几十行 `declare_parameter()` 默认值，改为遍历 `FRENET_NODE_DEFAULTS`；
+- `launch/pnc_sim_launch.py` 不再本地维护 Frenet launch 参数表，改为从 `preset.py` 导入共享表；
+- 新增 `frenet_static_test_launch_args()`，固定测试脚本和随机障碍 runner 共用同一份 47 个 Frenet launch 覆盖参数；
+- `run_frenet_test.sh` 不再手写完整 Frenet 参数长列表，而是调用 `python3 -m pnc_rc.frenet.preset --shell-launch-args` 生成；
+- `planner.py` 新增 `local_grid_shape()`，消除 `build_occupancy_grid()` 和 `local_static_map_occupancy()` 中重复的局部栅格尺寸公式；
+- `node.py`、`planner.py`、`preset.py`、随机测试 runner 的 class/function docstring 全部补齐，当前 AST 检查没有缺失 docstring。
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  code/lqr_sweep/frenet_random_robustness.py \
+  code/run_frenet_planner.py \
+  launch/pnc_sim_launch.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+PYTHONPATH=code python3 -m pnc_rc.frenet.preset --target-speed 3.0 --avoidance-speed 1.2 --shell-launch-args
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+39 passed
+docker: colcon build + ros2 launch --show-args 可看到 enable_frenet_planner、frenet_target_speed、frenet_grid_forward_m
+```
+
+## 2026-05-26 更新：同侧内部蛇形抑制
+
+问题：旧的同侧锁定只判断候选在中心线左侧还是右侧，因此只能防止 `d>0` 和
+`d<0` 之间切换。若车辆始终在中心线同一侧，但候选在 `d=0.4m` 和 `d=1.4m`
+之间来回跳，旧逻辑仍会认为它们是“同侧”，RViz 中依然会出现蛇形。
+
+改动：
+
+- `select_side_consistent_candidate()` 新增横向通道 profile 比较；
+- node 现在记录上一条选中候选的 `s/d` 曲线，而不是只记录 `d_final` 和左右侧；
+- 新候选会在前方 `frenet_candidate_profile_lookahead_m` 范围内与上一条 `d(s)` 对齐比较；
+- 若 profile 最大横向跳变超过 `frenet_candidate_profile_max_jump_m`，默认不切到该候选；
+- 只有 raw best 比当前通道至少多出 `frenet_candidate_profile_unlock_clearance_gain_m` 的 clearance，且达到 `safe_clearance_m`，才允许跳出原通道；
+- 中心线短暂安全时只清掉可复用 path cache，不立刻清掉横向通道记忆；通道记忆由 `frenet_candidate_channel_memory_timeout_s` 控制；
+- 新增测试覆盖：同侧内部大横向跳变会选择原通道；当新通道 clearance 明显更高时允许解锁。
+
+新增参数：
+
+```text
+frenet_candidate_profile_consistency_weight:=20.0
+frenet_candidate_profile_max_jump_m:=0.35
+frenet_candidate_profile_lookahead_m:=4.0
+frenet_candidate_profile_unlock_clearance_gain_m:=0.12
+frenet_candidate_channel_memory_timeout_s:=1.5
+```
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  test/test_frenet_planner.py \
+  test/test_frenet_random_robustness.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+41 passed
+docker: colcon build + ros2 launch --show-args 可看到全部 frenet_candidate_profile_* 和 frenet_candidate_channel_memory_timeout_s
+```
+
+## 2026-05-26 更新：Frenet 代码去重和中文注释整理
+
+目标：方便人工继续排查 Frenet 行为问题，不再让参数公式、缓存轨迹复用逻辑和核心碰撞工具分散难读。
+
+改动：
+
+- 新增 `code/pnc_rc/frenet/preset.py`，把 target speed / avoidance speed 派生出的 Frenet preset 公式集中到一个 Python 模块；
+- `run_frenet_test.sh` 通过 `python3 -m pnc_rc.frenet.preset --shell-defaults` 获取默认 Frenet 参数，避免 bash 和随机测试 runner 各写一份公式；
+- `code/lqr_sweep/frenet_random_robustness.py` 复用同一个 preset 模块，并补充 batch/rviz 随机障碍测试的中文 Google 风格 docstring；
+- `launch/pnc_sim_launch.py` 用 `FRENET_LAUNCH_ARGUMENT_DEFAULTS` 和 `FRENET_NODE_PARAM_MAP` 集中声明/转发 Frenet launch 参数，减少超长重复 `DeclareLaunchArgument` 和 `-p` 列表；
+- `code/pnc_rc/frenet/node.py` 抽出 `_safe_cached_candidate()` 和 `_trim_cached_candidate()`，让 hold/reuse 两条路径共用缓存候选安全复检和重锚定逻辑；
+- `planner.py` 给 `OccupancyGrid.query_path()`、地图坐标转换、多项式求解、路径空间加密、扫掠通道、路径裁剪、速度相关激活距离等核心函数补充中文 Google 风格注释；
+- `node.py` 给 ROS callback、发布路径/限速、debug marker、fallback 和 helper 补充中文 Google 风格注释；
+- `code/run_frenet_planner.py` 入口说明改为中文。
+
+保留风险：
+
+- Frenet 默认参数仍存在三层来源：node 内部默认值、launch 默认值、测试脚本覆盖值。当前没有强行统一，因为这会改变现有 launch 覆盖语义；
+- 固定测试脚本和随机测试 runner 的完整 launch 覆盖参数列表仍是两份手写列表，只共享了速度相关 preset 公式；
+- 低速/高速下 `approach_extra_m` 当前为 `max(0.75, target^2 / 3.0)`，3.0m/s 时会提前 3.0m 进入 approach 区间，若你觉得降速过早，应优先看这个参数。
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  code/lqr_sweep/frenet_random_robustness.py \
+  code/run_frenet_planner.py \
+  launch/pnc_sim_launch.py
+bash -n run_frenet_test.sh
+bash -n run_frenet_random_obstacle_robustness.sh
+PYTHONPATH=code python3 -m pnc_rc.frenet.preset --target-speed 3.0 --avoidance-speed 1.2 --shell-defaults
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+39 passed
+```
+
+## 2026-05-26 最终补充：同侧内部蛇形剩余漏洞
+
+RViz 截图继续出现左上角候选左右跳变后，复查发现剩余漏洞是：上一版 profile
+锁定只处理“存在阈值内候选”的情况。如果所有候选都超过
+`frenet_candidate_profile_max_jump_m`，代码会退回同侧选择，导致同一侧内部仍可大幅横跳。
+
+本次修复：
+
+- 只要上一条 `d(s)` profile 和当前候选可比较，就优先按 profile 误差决策；
+- 阈值内有候选时仍选 `same_profile`；
+- 阈值内没有候选时选 `max profile error` 最小的候选，reason 为
+  `least_profile_jump`；
+- 仅当 raw best 有明确 clearance 收益时才允许打破该 profile 锁；
+- 新增单测 `test_profile_consistent_selection_uses_least_jump_when_all_exceed_limit()`。
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  test/test_frenet_planner.py \
+  test/test_frenet_random_robustness.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+42 passed
+```
+
+## 2026-05-26 更新：修复绕障后硬切中心线导致的蛇形
+
+录屏复查结论：RViz 中看起来像候选轨迹左右乱选，但 LQR 日志显示 `e_y`
+会瞬间从接近 0 跳到约 0.7m。根因是 Frenet 状态机只要检测到中心线前方
+无障碍，就直接发布 `d=0` 中心线路径；此时车辆仍在障碍外侧，局部路径会
+横向硬跳到中心线，控制器随后反向追线，表现为蛇形。
+
+改动：
+
+- 新增 `sample_return_to_centerline_segment()`，从当前 `d` 平滑收敛到中心线；
+- `_publish_centerline_path()` 新增 `start_d`，当 `abs(d)` 大于
+  `frenet_centerline_return_direct_d_threshold_m` 时发布平滑回中路径，而不是直接
+  发布中心线；
+- 回中阶段使用 avoidance speed limit，避免刚绕完障碍就高速横向收敛；
+- 新增 `path_pose_error()`，计算车辆相对旧路径的横向距离和航向误差；
+- held path 复用新增 `frenet_held_path_max_lateral_error_m` 和
+  `frenet_held_path_max_heading_error_rad`，车辆离旧路径太远或朝向不一致时强制
+  重规划，不再复用滞后的旧轨迹；
+- 新增单测覆盖平滑回中路径和 stale held path 几何误差检测。
+
+新增参数：
+
+```text
+frenet_centerline_return_direct_d_threshold_m:=0.20
+frenet_held_path_max_lateral_error_m:=0.45
+frenet_held_path_max_heading_error_rad:=0.85
+```
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  code/lqr_sweep/frenet_random_robustness.py \
+  code/run_frenet_planner.py \
+  launch/pnc_sim_launch.py \
+  test/test_frenet_planner.py \
+  test/test_frenet_random_robustness.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+PYTHONPATH=code python3 -m pnc_rc.frenet.preset --target-speed 3.0 --avoidance-speed 1.2 --shell-launch-args | rg "held_path_max|centerline_return_direct"
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+44 passed
+docker: colcon build --packages-select f1tenth_gym_ros + ros2 launch --show-args 可看到新增的 3 个 launch 参数
+```
+
+## 2026-05-26 更新：保留可信减速度并修复 stop path 退化
+
+继续 review 后发现两个问题：
+
+- `_forward_progress_planning_state()` 使用硬编码 `1.0m/s^2` 判断加速度是否可信，
+  且最终 `max(0.0, s_ddot)` 会把所有负加速度抹掉；这会丢掉真实刹车状态；
+- `stop_path_length_m=0.25` 会让 LQR 在超短 3 点 stop path 上反复触发
+  open-loop endpoint，短仿真日志里曾出现 `max_abs_e_y=5.62m`、`|Δe_y|>0.25m`
+  共 297 次的路径误差突跳。
+
+改动：
+
+- `FrenetPlannerConfig` 新增 `max_initial_s_accel_mps2` 和
+  `max_reliable_initial_s_accel_mps2`；
+- `_forward_progress_planning_state()` 现在保留可信范围内的正/负初始加速度，
+  只把超过可靠上界的离群估计拒绝为 0；
+- 默认值设为 `max_initial=2.0m/s^2`、`max_reliable=3.0m/s^2`，并通过 launch
+  参数暴露；
+- `stop_path_length_m` 默认从 `0.25m` 改为 `2.0m`；
+- `publish_stop_path()` 不再只发 3 个点，而是按 `centerline_return_step_m`
+  采样一条非退化停车保持路径；停车仍由 `stop` 模式 0 速限制完成。
+
+新增/调整参数：
+
+```text
+frenet_max_initial_s_accel_mps2:=2.0
+frenet_max_reliable_initial_s_accel_mps2:=3.0
+frenet_stop_path_length_m:=2.0
+```
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  test/test_frenet_planner.py \
+  test/test_frenet_random_robustness.py \
+  launch/pnc_sim_launch.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+44 passed
+docker: colcon build --packages-select f1tenth_gym_ros + ros2 launch --show-args 可看到新增/调整参数
+FRENET_HEADLESS_TIMEOUT_S=35 ./run_frenet_test.sh --headless --target-speed 3.0 --avoidance-speed 1.2
+latest LQR log: max_abs_e_y=0.193m, jumps |Δe_y|>0.25m = 0
+```
+
+## 2026-05-26 更新：简化 Frenet 判定逻辑，修复慢退出和候选粘滞
+
+subagent 只读审计结论：
+
+- `node.py` 的主要粘滞来自三点叠加：回中路径仍用 `avoidance` 模式发布、
+  approach 阶段提前生成候选束、held/reuse 继续保留旧 candidate marker；
+- `planner.py` 的候选选择逻辑过度复杂，把 profile 锁定、中心线左右侧锁定、
+  endpoint 连续性、clearance 解锁和 cost gap 多套规则混在一个函数里；
+- 真正必须保留的是 hard-safe 过滤：progress、collision、min clearance、
+  curvature 和路径扫掠检查。
+
+本次简化：
+
+- `approach` 只做提前限速和中心线跟踪，不再触发 Frenet 候选规划；
+- 只有障碍进入 `activation_lookahead` 后才进入 Frenet 候选生成；
+- 回中路径按调用方模式发布，不再因为 `abs(d)` 大就强制使用 `avoidance`
+  限速；
+- 删除运行时“中心线左右侧”候选锁定，不再维护
+  `last_selected_candidate_side`；
+- `select_side_consistent_candidate()` 重命名并简化为
+  `select_temporally_consistent_candidate()`；
+- 候选二次选择现在只使用一个 adjusted cost：
+  `raw_cost + endpoint_d_jump_penalty + profile_error_penalty`；
+- 删除 `candidate_side_switch_penalty`、`candidate_side_deadband_m` 及对应
+  launch/script/test 参数。
+
+当前语义：
+
+- `centerline`：无威胁或威胁仍在 slowdown 外，发布中心线/回中路径；
+- `approach`：威胁进入 slowdown 但仍在 activation 外，只提前限速，不显示候选束；
+- `frenet`：威胁进入 activation 后才规划候选；
+- `stop`：activation 内无安全候选且不能复用旧安全路径。
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  test/test_frenet_planner.py \
+  test/test_frenet_random_robustness.py \
+  launch/pnc_sim_launch.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+PYTHONPATH=code python3 -m pytest test/test_frenet_planner.py test/test_frenet_random_robustness.py -q
+```
+
+结果：
+
+```text
+py_compile: passed
+bash -n: passed
+docker pytest: 40 passed
+```
+
+## 2026-05-27 更新：缩短绕障后的平滑回中距离
+
+问题：小车越过障碍物后已经切回 centerline 状态，但仍沿绕障后的偏移轨迹慢慢
+回中。原因是 `frenet_centerline_return_lookahead_m` 固定为 5.0m，平滑回中
+曲线会在 5m 内逐渐把当前 `d` 收敛到 0，对小赛道来说太慢。
+
+改动：
+
+- `FrenetPreset` 新增 `centerline_return_lookahead_m`；
+- 固定测试和随机障碍测试的 launch 参数不再写死 5.0m，改为随目标速度生成；
+- 速度相关默认值：
+  - `target_speed <= 0.75m/s` 时使用 `2.0m`；
+  - `target_speed = 3.0m/s` 时使用 `3.5m`；
+  - 中间速度线性过渡并限制在 `[2.0m, 3.5m]`；
+- `run_frenet_test.sh` 新增环境变量覆盖入口：
+  `FRENET_CENTERLINE_RETURN_LOOKAHEAD_M`；
+- 脚本启动摘要新增 `centerline_return: lookahead=...m`，方便确认当前值。
+
+预期效果：绕障结束后仍保留平滑回中，避免硬切 centerline 引起横跳；但回中长度
+从 5.0m 缩短到 2.0-3.5m，小车会更快贴回 centerline。
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/preset.py \
+  code/pnc_rc/frenet/node.py \
+  test/test_frenet_random_robustness.py
+bash -n run_frenet_test.sh && bash -n run_frenet_random_obstacle_robustness.sh
+PYTHONPATH=code python3 -m pnc_rc.frenet.preset --target-speed 3.0 --avoidance-speed 1.2 --shell-launch-args
+PYTHONPATH=code python3 -m pnc_rc.frenet.preset --target-speed 0.5 --avoidance-speed 0.5 --shell-launch-args
+docker pytest: test/test_frenet_planner.py test/test_frenet_random_robustness.py
+41 passed
+FRENET_HEADLESS_TIMEOUT_S=35 ./run_frenet_test.sh --headless --target-speed 3.0 --avoidance-speed 1.2
+startup summary: centerline_return: lookahead=3.500m
+latest LQR log: max_abs_e_y=0.211m, max |Δe_y|=0.211m, jumps |Δe_y|>0.25m = 0
+```
+
+## 2026-05-27 更新：Frenet 激活距离与候选平滑性选择
+
+问题：
+
+- `target_speed=3.0m/s` 时，速度公式给出的 Frenet activation 约 `8.05m`，
+  但实际发布给 LQR 的局部路径曾只有约 `3.9m`；
+- 过早进入 Frenet 时，障碍还没有进入有效局部路径窗口，候选容易仍沿中心线；
+- 等车辆走完约 80% 发布路径后再次规划时，障碍已经很近，可能出现急停或无解；
+- 候选选择不应简单偏好“低绝对曲率/越直越好”，而应优先选择局部曲率变化率小、
+  更平滑、不弯弯绕绕的安全轨迹。
+
+改动：
+
+- 新增 `activation_path_margin_m` / `frenet_activation_path_margin_m`，当前默认
+  `0.50m`；
+- 有发布路径长度上限时，实际 Frenet activation 改为：
+  `min(raw_activation, max_published_path_length_m + activation_path_margin_m)`；
+- 在 `target_speed=3.0m/s`、`max_published_path_length_m=5.4m` 下：
+  - 原始速度公式 activation 约 `8.05m`；
+  - 实际 Frenet activation 变为约 `5.90m`；
+  - slowdown/approach 距离变为约 `6.65m`；
+- 调整状态机顺序：先检测中心线威胁；若中心线已安全或威胁仍较远，发布
+  centerline/approach，不继续 hold 旧 Frenet 路径；
+- 只有障碍进入有效 activation 距离后，才允许 hold 旧 Frenet 路径或重新生成
+  Frenet 候选；
+- `FrenetPlannerConfig.max_curvature` 默认改为 `1.14 1/m`，对应
+  `tan(0.36rad) / 0.3302m`，即仅按车辆前轮转角限幅约束；
+- `weight_curvature` 降为 `0.4`，避免额外偏好“越直越好”；
+- `weight_curvature_rate` 提高到 `8.0`，并新增
+  `curvature_smoothness_cost()`，按弧长归一化惩罚 `dk/ds` 的平均平方值；
+- 新增回归测试，验证同样安全时，局部曲率变化率更大的 wavy 轨迹 cost 更高。
+
+当前关键参数：
+
+```text
+frenet_max_curvature:=1.14
+frenet_weight_curvature:=0.4
+frenet_weight_curvature_rate:=8.0
+frenet_max_published_path_length_m:=5.4
+frenet_activation_path_margin_m:=0.50
+```
+
+验证：
+
+```text
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/pnc_rc/frenet/planner.py \
+  code/pnc_rc/frenet/node.py \
+  code/pnc_rc/frenet/preset.py \
+  test/test_frenet_planner.py
+bash -n run_frenet_test.sh
+docker run --rm --entrypoint /bin/bash \
+  -v /home/art3m1s/f1tenth_frenet_static_avoidance:/sim_ws/src/f1tenth_gym_ros \
+  f1tenth_gym_ros:latest \
+  -lc 'cd /sim_ws/src/f1tenth_gym_ros && PYTHONPATH=code python3 -m pytest test/test_frenet_planner.py test/test_frenet_random_robustness.py -q'
+FRENET_HEADLESS_TIMEOUT_S=20 ./run_frenet_test.sh --headless \
+  --target-speed 3.0 --avoidance-speed 1.2
+```
+
+结果：
+
+```text
+py_compile: passed
+bash -n: passed
+docker pytest: 44 passed
+headless startup summary: activation path_margin=0.500m, max_path_length=5.4m
+runtime expectation: activation_lookahead≈5.90m, slowdown_lookahead≈6.65m
+```
+
+## 2026-05-27 更新：随机障碍 RViz 可视化 45s 自动停止
+
+问题：
+
+- 随机障碍鲁棒性 batch 模式按圈数/碰撞/timeout 停止；
+- RViz 可视化模式原来直接前台运行 `ros2 launch`，需要人工关闭，不适合快速
+  单 seed 观察。
+
+改动：
+
+- `code/lqr_sweep/frenet_random_robustness.py` 的 `run_rviz_seed()` 改为
+  `subprocess.Popen(..., preexec_fn=os.setsid)`；
+- RViz 模式不按圈数判定，只用于人工观察；
+- `--timeout > 0` 时到时自动向整个 `ros2 launch` 进程组发送 SIGINT；
+- `--timeout 0` 时保持原手动关闭行为；
+- `run_frenet_random_obstacle_robustness.sh --rviz` 默认 timeout 改为 `45s`，
+  batch 模式默认仍是 `240s`；
+- 新增一键脚本 `run_frenet_random_obstacle_rviz.sh`，默认：
+  - `--rviz`
+  - `--trials 1`
+  - `--timeout 45`
+  - 其他参数透传给原 runner。
+
+强制停车/停止相关入口：
+
+- Frenet 无 LaserScan：`FrenetStaticObstaclePlanner.plan_once()` 发布 stop path；
+- activation 内无安全 Frenet 候选且不能复用旧路径：
+  `_publish_approach_or_stop(..., preactivation_only=False)` 发布 stop path；
+- `publish_stop_path()` 发布 `mode="stop"` 的局部路径；
+- `_speed_limit_for_mode("stop")` 发布 `stop_speed_limit_mps=0.0`；
+- LQR `speed_limit_callback()` 接收 0 限速，并在 `_compute_speed_command()` 中把
+  `speed_cmd` 压到 0；
+- LQR `_open_loop_finished()` 触发时也会把 `v_cmd=0.0`。
+
+使用：
+
+```text
+./run_frenet_random_obstacle_rviz.sh --seed 0 --target-speed 3.0 --avoidance-speed 1.2
+./run_frenet_random_obstacle_rviz.sh --seed 0 --timeout 60
+./run_frenet_random_obstacle_rviz.sh --seed 0 --timeout 0  # 手动关闭
+```
+
+验证：
+
+```text
+bash -n run_frenet_random_obstacle_robustness.sh
+bash -n run_frenet_random_obstacle_rviz.sh
+PYTHONPYCACHEPREFIX=/tmp/f1tenth_pycache python3 -m py_compile \
+  code/lqr_sweep/frenet_random_robustness.py
+docker run --rm --entrypoint /bin/bash \
+  -v /home/art3m1s/f1tenth_frenet_static_avoidance:/sim_ws/src/f1tenth_gym_ros \
+  f1tenth_gym_ros:latest \
+  -lc 'cd /sim_ws/src/f1tenth_gym_ros && PYTHONPATH=code python3 -m pytest test/test_frenet_random_robustness.py -q'
+```
+
+结果：
+
+```text
+bash -n: passed
+py_compile: passed
+docker pytest: 7 passed
+```

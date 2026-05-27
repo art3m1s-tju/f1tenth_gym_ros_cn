@@ -6,12 +6,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
 from lqr_sweep.frenet_random_robustness import (
+    build_launch_cmd,
     compute_frenet_preset,
     count_laps_from_positions,
     count_laps_from_tracking,
     summarize_launch_log,
     summarize_tracking_log,
 )
+from pnc_rc.frenet.preset import frenet_static_test_launch_args
 
 
 def test_compute_frenet_preset_scales_high_speed_parameters():
@@ -21,8 +23,44 @@ def test_compute_frenet_preset_scales_high_speed_parameters():
     assert math.isclose(preset.v_min, 0.84)
     assert preset.grid_forward_m == 20.0
     assert preset.activation_max_m > 8.0
+    assert math.isclose(preset.approach_extra_m, 0.75)
+    assert math.isclose(preset.activation_path_margin_m, 0.50)
+    assert math.isclose(preset.centerline_return_lookahead_m, 3.5)
     assert preset.reuse_timeout_s == 2.0
-    assert preset.candidate_side_switch_penalty == 35.0
+    assert math.isclose(preset.hold_min_remaining_m, 0.90)
+    assert math.isclose(preset.max_published_path_length_m, 5.4)
+
+
+def test_compute_frenet_preset_shortens_low_speed_centerline_return():
+    preset = compute_frenet_preset(0.5, 0.5)
+
+    assert math.isclose(preset.centerline_return_lookahead_m, 2.0)
+
+
+def test_build_launch_cmd_can_enable_rviz(tmp_path):
+    preset = compute_frenet_preset(3.0, 1.2)
+
+    cmd = build_launch_cmd(
+        repo_root=tmp_path,
+        map_prefix=tmp_path / "map" / "seed_000",
+        track_csv=tmp_path / "track.csv",
+        trajectory_csv=tmp_path / "trajectory.csv",
+        tracking_log=tmp_path / "tracking.csv",
+        target_speed=3.0,
+        avoidance_speed=1.2,
+        start_x=3.0,
+        start_y=5.0,
+        start_theta=3.1416,
+        preset=preset,
+        enable_rviz=True,
+    )
+
+    assert "enable_rviz:=true" in cmd
+    assert "enable_rviz:=false" not in cmd
+    assert all(arg in cmd for arg in frenet_static_test_launch_args(preset, 1.2))
+    assert "frenet_centerline_return_lookahead_m:=3.500" in cmd
+    assert "frenet_max_published_path_length_m:=5.400" in cmd
+    assert "frenet_candidate_profile_max_jump_m:=0.35" in cmd
 
 
 def test_count_laps_from_tracking_uses_index_wraps_near_start():

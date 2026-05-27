@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Batch robustness validation for Frenet static-obstacle avoidance."""
+"""Frenet 静态障碍避障批量鲁棒性测试入口。
+
+该脚本在同一条赛道上按 seed 随机生成障碍物地图，启动仿真并从 LQR tracking
+日志与 launch 日志中提取碰撞、卡住、完成圈数等指标。`--mode batch` 用于
+自动统计成功率，`--mode rviz` 用于打开同一套参数的可视化单 seed 调试。
+"""
 from __future__ import annotations
 
 import argparse
@@ -20,34 +25,33 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lqr_sweep.generate_static_obstacle_test_map import write_obstacle_map
+from pnc_rc.frenet.preset import FrenetPreset
+from pnc_rc.frenet.preset import compute_frenet_preset
+from pnc_rc.frenet.preset import frenet_static_test_launch_args
 
 
 CONTAINER_PKG = Path("/sim_ws/src/f1tenth_gym_ros")
 
 
-@dataclass(frozen=True)
-class FrenetPreset:
-    geometry_target_speed: float
-    v_min: float
-    v_max: float
-    v_step: float
-    d_step: float
-    trajectory_dt: float
-    grid_forward_m: float
-    max_hold_age_s: float
-    hold_replan_clearance_m: float
-    hold_min_remaining_m: float
-    reuse_timeout_s: float
-    activation_max_m: float
-    activation_reaction_s: float
-    approach_extra_m: float
-    candidate_consistency_weight: float
-    candidate_side_switch_penalty: float
-    candidate_side_deadband_m: float
-
-
 @dataclass
 class TrackingSummary:
+    """从 LQR tracking CSV 中提取的单次试验摘要。
+
+    Attributes:
+        completed_laps: 根据车辆实际位置或路径索引估计的完成圈数。
+        zero_limit_runs: 局部限速为 0 且持续超过阈值的次数。
+        low_speed_stuck_runs: 实际速度和指令速度都很低的卡住次数。
+        max_zero_limit_duration_s: 最长 0 限速持续时间，单位 s。
+        max_low_speed_duration_s: 最长低速卡住持续时间，单位 s。
+        negative_v_path_count: 规划路径速度突然变负的日志行数，通常代表碰撞反弹。
+        row_count: tracking CSV 有效行数。
+        duration_s: 日志覆盖的仿真时间，单位 s。
+        max_v_actual: 实际速度最大值，单位 m/s。
+        max_v_cmd: 控制器速度指令最大值，单位 m/s。
+        min_local_speed_limit: Frenet 局部限速最小值，单位 m/s。
+        max_local_speed_limit: Frenet 局部限速最大值，单位 m/s。
+    """
+
     completed_laps: int = 0
     zero_limit_runs: int = 0
     low_speed_stuck_runs: int = 0
@@ -64,6 +68,14 @@ class TrackingSummary:
 
 @dataclass
 class LaunchSummary:
+    """从 ROS launch 日志中提取的避障故障计数。
+
+    Attributes:
+        ego_collision_count: 仿真器报告 ego collision 的次数。
+        no_safe_stop_count: Frenet 无安全候选并发布 stop path 的次数。
+        zero_limit_log_count: LQR 收到 0 局部限速日志的次数。
+    """
+
     ego_collision_count: int = 0
     no_safe_stop_count: int = 0
     zero_limit_log_count: int = 0
@@ -71,6 +83,29 @@ class LaunchSummary:
 
 @dataclass
 class TrialResult:
+    """单个随机 seed 的完整测试结果。
+
+    Attributes:
+        seed: 随机障碍 seed。
+        success: 是否在无碰撞/不卡住条件下完成目标圈数。
+        failure_reason: 失败原因；成功时为空字符串。
+        completed_laps: 本 trial 完成圈数。
+        obstacle_count: 本 trial 障碍物数量。
+        map_prefix: 生成地图路径前缀，不带扩展名。
+        tracking_log: LQR tracking CSV 路径。
+        launch_log: ROS launch 日志路径。
+        duration_s: tracking 日志覆盖时间，单位 s。
+        zero_limit_runs: 0 限速卡住次数。
+        low_speed_stuck_runs: 低速卡住次数。
+        max_zero_limit_duration_s: 最长 0 限速持续时间，单位 s。
+        max_low_speed_duration_s: 最长低速卡住持续时间，单位 s。
+        negative_v_path_count: 速度符号异常行数。
+        ego_collision_count: 仿真碰撞次数。
+        no_safe_stop_count: Frenet stop fallback 次数。
+        max_v_actual: 实际速度最大值，单位 m/s。
+        max_v_cmd: 指令速度最大值，单位 m/s。
+    """
+
     seed: int
     success: bool
     failure_reason: str
@@ -91,34 +126,17 @@ class TrialResult:
     max_v_cmd: float
 
 
-def compute_frenet_preset(target_speed: float, avoidance_speed: float) -> FrenetPreset:
-    target = float(target_speed)
-    avoidance = float(avoidance_speed)
-    geom_target = max(1.2, target, avoidance)
-    v_min = max(0.6, min(avoidance * 0.7, target * 0.5, geom_target))
-    v_max = max(1.8, geom_target * 1.25, avoidance * 1.5)
-    return FrenetPreset(
-        geometry_target_speed=geom_target,
-        v_min=v_min,
-        v_max=v_max,
-        v_step=0.75 if target >= 2.0 else 0.6,
-        d_step=0.35 if target >= 2.0 else 0.3,
-        trajectory_dt=0.10 if target >= 2.0 else 0.05,
-        grid_forward_m=max(10.0, target * 6.0 + 2.0),
-        max_hold_age_s=0.80 if target >= 2.0 else 0.45,
-        hold_replan_clearance_m=0.10 if target >= 2.0 else 0.20,
-        hold_min_remaining_m=max(2.0, target * 1.0),
-        reuse_timeout_s=2.0 if target >= 2.0 else 1.0,
-        activation_max_m=max(8.0, 2.5 + target * 2.7),
-        activation_reaction_s=1.2 if target >= 2.0 else 1.0,
-        approach_extra_m=max(1.0, target * target / 4.0),
-        candidate_consistency_weight=10.0 if target >= 2.0 else 8.0,
-        candidate_side_switch_penalty=35.0 if target >= 2.0 else 25.0,
-        candidate_side_deadband_m=0.20,
-    )
-
-
 def _float_value(row: dict[str, str], key: str, default: float = math.nan) -> float:
+    """安全读取 CSV 行中的浮点数。
+
+    Args:
+        row: `csv.DictReader` 读出的单行。
+        key: 目标字段名。
+        default: 字段缺失、空字符串或无法转换时返回的默认值。
+
+    Returns:
+        解析出的浮点值，失败时返回 `default`。
+    """
     try:
         value = row.get(key, "")
         return float(value) if value != "" else default
@@ -132,6 +150,17 @@ def count_laps_from_tracking(
     start_y: float,
     threshold_m: float = 0.5,
 ) -> int:
+    """基于 tracking CSV 的 `closest_idx` 粗略估计完成圈数。
+
+    Args:
+        rows: tracking CSV 全部行。
+        start_x: 起点 x 坐标，单位 m。
+        start_y: 起点 y 坐标，单位 m。
+        threshold_m: 通过起点附近才计入换圈的距离阈值，单位 m。
+
+    Returns:
+        估计完成圈数。日志太短或缺少索引时返回 0。
+    """
     if len(rows) < 500:
         return 0
     indices: list[int] = []
@@ -159,6 +188,17 @@ def count_laps_from_tracking(
 
 
 def load_reference_xy(path: Path) -> np.ndarray:
+    """读取参考轨迹 CSV 的二维坐标。
+
+    Args:
+        path: 参考轨迹 CSV 路径，支持 `x/y` 或 `pos_x/pos_y` 字段。
+
+    Returns:
+        形状为 `(N, 2)` 的参考轨迹点数组。
+
+    Raises:
+        ValueError: 参考点数量少于 3。
+    """
     points: list[tuple[float, float]] = []
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -173,6 +213,15 @@ def load_reference_xy(path: Path) -> np.ndarray:
 
 
 def count_laps_from_positions(rows: list[dict[str, str]], reference_xy: np.ndarray) -> int:
+    """基于车辆实际位置和全局参考线估计完成圈数。
+
+    Args:
+        rows: tracking CSV 全部行。
+        reference_xy: 全局参考线二维坐标数组。
+
+    Returns:
+        按参考线最近点 unwrap 后得到的完成圈数。
+    """
     if len(rows) < 100 or len(reference_xy) < 3:
         return 0
     positions: list[tuple[float, float]] = []
@@ -215,6 +264,16 @@ def _count_runs(
     predicate,
     min_duration_s: float,
 ) -> int:
+    """统计满足谓词且持续超过阈值的连续片段数量。
+
+    Args:
+        rows: tracking CSV 全部行。
+        predicate: 接收 `(row, t, start_time)` 并返回是否处于故障状态的函数。
+        min_duration_s: 计为一次 run 的最短持续时间，单位 s。
+
+    Returns:
+        连续故障片段数量。
+    """
     if not rows:
         return 0
     start_time = _float_value(rows[0], "time", 0.0)
@@ -240,6 +299,15 @@ def _count_runs(
 
 
 def _max_run_duration(rows: list[dict[str, str]], predicate) -> float:
+    """计算满足谓词的最长连续片段时长。
+
+    Args:
+        rows: tracking CSV 全部行。
+        predicate: 接收 `(row, t, start_time)` 并返回是否处于故障状态的函数。
+
+    Returns:
+        最长连续时长，单位 s。
+    """
     if not rows:
         return 0.0
     start_time = _float_value(rows[0], "time", 0.0)
@@ -269,6 +337,17 @@ def summarize_tracking_log(
     start_y: float,
     reference_xy: np.ndarray | None = None,
 ) -> TrackingSummary:
+    """汇总单个 trial 的 tracking CSV。
+
+    Args:
+        log_path: tracking CSV 路径。
+        start_x: 起点 x 坐标，单位 m。
+        start_y: 起点 y 坐标，单位 m。
+        reference_xy: 可选全局参考线；提供时优先用实际位置估计圈数。
+
+    Returns:
+        `TrackingSummary`。日志不存在或为空时返回默认空摘要。
+    """
     if not log_path.exists():
         return TrackingSummary()
     with log_path.open("r", encoding="utf-8") as f:
@@ -319,6 +398,14 @@ def summarize_tracking_log(
 
 
 def summarize_launch_log(log_path: Path) -> LaunchSummary:
+    """统计 launch 日志中的关键故障字符串。
+
+    Args:
+        log_path: ROS launch 标准输出日志路径。
+
+    Returns:
+        `LaunchSummary`。日志不存在时返回默认空摘要。
+    """
     if not log_path.exists():
         return LaunchSummary()
     text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -342,13 +429,33 @@ def build_launch_cmd(
     start_y: float,
     start_theta: float,
     preset: FrenetPreset,
+    enable_rviz: bool = False,
 ) -> list[str]:
+    """构造单次随机障碍测试的 ROS launch 命令。
+
+    Args:
+        repo_root: 容器内 package 根目录。
+        map_prefix: 随机障碍地图前缀，不带 `.yaml/.pgm` 后缀。
+        track_csv: 全局参考赛道 CSV。
+        trajectory_csv: 本轮导出的全局轨迹 CSV 路径。
+        tracking_log: LQR tracking CSV 日志路径。
+        target_speed: LQR 全局巡航目标速度，单位 m/s。
+        avoidance_speed: Frenet 避障阶段局部限速，单位 m/s。
+        start_x: 初始 x 坐标，单位 m。
+        start_y: 初始 y 坐标，单位 m。
+        start_theta: 初始航向，单位 rad。
+        preset: 由 `compute_frenet_preset()` 生成的 Frenet 参数预设。
+        enable_rviz: 是否启动 RViz。
+
+    Returns:
+        可直接传给 `subprocess.Popen()` 或 `subprocess.run()` 的命令数组。
+    """
     launch_file = repo_root / "launch" / "pnc_sim_launch.py"
     return [
         "ros2",
         "launch",
         str(launch_file),
-        "enable_rviz:=false",
+        f"enable_rviz:={'true' if enable_rviz else 'false'}",
         "enable_frenet_planner:=true",
         f"map_path:={map_prefix}",
         f"track_csv:={track_csv}",
@@ -364,98 +471,27 @@ def build_launch_cmd(
         "max_decel:=2.0",
         "curvature_speed_lookahead_m:=1.5",
         "local_speed_limit_timeout_s:=1.0",
-        "frenet_reference_closed_loop:=true",
-        "frenet_centerline_speed_limit_mps:=-1.0",
-        f"frenet_avoidance_speed_limit_mps:={avoidance_speed}",
-        "frenet_stop_speed_limit_mps:=0.0",
-        f"frenet_target_speed:={preset.geometry_target_speed:.3f}",
-        f"frenet_v_min:={preset.v_min:.3f}",
-        f"frenet_v_max:={preset.v_max:.3f}",
-        f"frenet_v_step:={preset.v_step:.3f}",
-        "frenet_t_min:=4.0",
-        "frenet_t_max:=6.0",
-        "frenet_t_step:=2.0",
-        f"frenet_trajectory_dt:={preset.trajectory_dt:.3f}",
-        "frenet_d_min:=-1.8",
-        "frenet_d_max:=1.8",
-        f"frenet_d_step:={preset.d_step:.3f}",
-        "frenet_max_heading_jump:=0.85",
-        "frenet_grid_inflation_radius_m:=0.18",
-        f"frenet_grid_forward_m:={preset.grid_forward_m:.3f}",
-        "frenet_grid_half_width_m:=3.2",
-        "frenet_max_curvature:=1.1",
-        "frenet_corridor_radius_m:=0.16",
-        "frenet_corridor_sample_step_m:=0.05",
-        "frenet_path_collision_sample_step_m:=0.05",
-        "frenet_footprint_front_m:=0.45",
-        "frenet_footprint_rear_m:=0.05",
-        "frenet_safe_clearance_m:=0.30",
-        "frenet_min_clearance_m:=0.06",
-        "frenet_published_path_lookahead_m:=0.25",
-        "frenet_min_path_publish_interval_s:=0.25",
-        "frenet_path_republish_distance_m:=0.50",
-        "frenet_path_republish_min_remaining_m:=2.0",
-        "frenet_centerline_return_lookahead_m:=5.0",
-        "frenet_centerline_threat_lookahead_m:=8.0",
-        "frenet_centerline_threat_corridor_radius_m:=0.22",
-        "frenet_activation_min_lookahead_m:=3.0",
-        f"frenet_activation_max_lookahead_m:={preset.activation_max_m:.3f}",
-        "frenet_activation_base_lookahead_m:=2.2",
-        f"frenet_activation_reaction_time_s:={preset.activation_reaction_s:.3f}",
-        "frenet_activation_decel_mps2:=2.0",
-        f"frenet_approach_slowdown_extra_m:={preset.approach_extra_m:.3f}",
-        f"frenet_reuse_last_candidate_timeout_s:={preset.reuse_timeout_s:.3f}",
-        f"frenet_max_held_path_age_s:={preset.max_hold_age_s:.3f}",
-        f"frenet_held_path_replan_clearance_m:={preset.hold_replan_clearance_m:.3f}",
-        f"frenet_held_path_min_remaining_m:={preset.hold_min_remaining_m:.3f}",
-        (
-            "frenet_candidate_lateral_consistency_weight:="
-            f"{preset.candidate_consistency_weight:.3f}"
-        ),
-        f"frenet_candidate_side_switch_penalty:={preset.candidate_side_switch_penalty:.3f}",
-        f"frenet_candidate_side_deadband_m:={preset.candidate_side_deadband_m:.3f}",
+        *frenet_static_test_launch_args(preset, avoidance_speed),
         f"log_path:={tracking_log}",
     ]
 
 
-def terminate_process_group(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.wait(timeout=5)
-    except ProcessLookupError:
-        pass
+def generate_trial_assets(
+    args: argparse.Namespace,
+    batch_dir: Path,
+    seed: int,
+) -> tuple[str, Path, Path, Path, Path, dict]:
+    """生成单个 seed 的地图、日志目录和输出路径。
 
+    Args:
+        args: CLI 参数命名空间。
+        batch_dir: 当前批次输出目录。
+        seed: 随机障碍 seed。
 
-def failure_reason(
-    tracking: TrackingSummary,
-    launch: LaunchSummary,
-    required_laps: int,
-    timed_out: bool,
-    tracking_log: Path,
-    stuck_duration_s: float,
-) -> str:
-    if not tracking_log.exists() or tracking.row_count == 0:
-        return "no_log"
-    if launch.ego_collision_count > 0:
-        return "collision"
-    if tracking.negative_v_path_count > 0:
-        return "negative_velocity"
-    if tracking.max_zero_limit_duration_s >= stuck_duration_s:
-        return "stuck_zero_speed_limit"
-    if tracking.max_low_speed_duration_s >= stuck_duration_s:
-        return "low_speed_stuck"
-    if tracking.completed_laps < required_laps:
-        prefix = "timeout" if timed_out else "incomplete"
-        return f"{prefix}_laps_{tracking.completed_laps}_of_{required_laps}"
-    return ""
-
-
-def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: FrenetPreset) -> TrialResult:
+    Returns:
+        `(trial_name, map_prefix, tracking_log, launch_log, trajectory_csv,
+        obstacle_summary)`。
+    """
     trial_name = f"seed_{seed:03d}"
     trial_dir = batch_dir / "trials" / trial_name
     maps_dir = trial_dir / "map"
@@ -482,6 +518,84 @@ def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: Fren
         min_separation_m=max(0.0, float(args.min_separation_m)),
         obstacle_distances_m=None,
     )
+    return trial_name, map_prefix, tracking_log, launch_log, trajectory_csv, obstacle_summary
+
+
+def terminate_process_group(proc: subprocess.Popen) -> None:
+    """停止 ros2 launch 进程组。
+
+    Args:
+        proc: 由 `subprocess.Popen()` 启动的 launch 进程。
+
+    Returns:
+        None。优先发送 SIGINT，超时后再发送 SIGKILL。
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait(timeout=5)
+    except ProcessLookupError:
+        pass
+
+
+def failure_reason(
+    tracking: TrackingSummary,
+    launch: LaunchSummary,
+    required_laps: int,
+    timed_out: bool,
+    tracking_log: Path,
+    stuck_duration_s: float,
+) -> str:
+    """根据日志摘要判定 trial 失败原因。
+
+    Args:
+        tracking: tracking CSV 摘要。
+        launch: launch 日志摘要。
+        required_laps: 成功所需完成圈数。
+        timed_out: 是否因超时结束 trial。
+        tracking_log: tracking CSV 路径，用于识别无日志失败。
+        stuck_duration_s: 判定卡住的最长允许持续时间，单位 s。
+
+    Returns:
+        失败原因字符串；成功时返回空字符串。
+    """
+    if not tracking_log.exists() or tracking.row_count == 0:
+        return "no_log"
+    if launch.ego_collision_count > 0:
+        return "collision"
+    if tracking.negative_v_path_count > 0:
+        return "negative_velocity"
+    if tracking.max_zero_limit_duration_s >= stuck_duration_s:
+        return "stuck_zero_speed_limit"
+    if tracking.max_low_speed_duration_s >= stuck_duration_s:
+        return "low_speed_stuck"
+    if tracking.completed_laps < required_laps:
+        prefix = "timeout" if timed_out else "incomplete"
+        return f"{prefix}_laps_{tracking.completed_laps}_of_{required_laps}"
+    return ""
+
+
+def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: FrenetPreset) -> TrialResult:
+    """运行一个 headless 随机障碍鲁棒性 trial。
+
+    Args:
+        args: CLI 参数命名空间。
+        batch_dir: 当前批次输出目录。
+        seed: 随机障碍 seed。
+        preset: Frenet 参数预设。
+
+    Returns:
+        `TrialResult`，包含成功/失败原因、圈数和诊断统计。
+    """
+    trial_name, map_prefix, tracking_log, launch_log, trajectory_csv, obstacle_summary = generate_trial_assets(
+        args,
+        batch_dir,
+        seed,
+    )
     reference_xy = load_reference_xy(args.obstacle_trajectory_csv.resolve())
 
     launch_cmd = build_launch_cmd(
@@ -496,6 +610,7 @@ def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: Fren
         start_y=args.sy,
         start_theta=args.stheta,
         preset=preset,
+        enable_rviz=False,
     )
 
     print("\n" + "=" * 72)
@@ -578,7 +693,82 @@ def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: Fren
     )
 
 
+def run_rviz_seed(args: argparse.Namespace, batch_dir: Path, seed: int, preset: FrenetPreset) -> int:
+    """生成一个随机 seed 并以前台 RViz 模式启动仿真。
+
+    RViz 模式用于人工观察，不按圈数判定成功/失败。`args.timeout > 0` 时，到时
+    自动向 ros2 launch 进程组发送 SIGINT，避免用户每次手动关闭一组 ROS 进程。
+
+    Args:
+        args: CLI 参数命名空间。
+        batch_dir: 当前批次输出目录。
+        seed: 随机障碍 seed。
+        preset: Frenet 参数预设。
+
+    Returns:
+        `ros2 launch` 进程退出码；若按 timeout 正常停止，返回 0。
+    """
+    trial_name, map_prefix, tracking_log, _launch_log, trajectory_csv, obstacle_summary = generate_trial_assets(
+        args,
+        batch_dir,
+        seed,
+    )
+    launch_cmd = build_launch_cmd(
+        repo_root=args.repo_root,
+        map_prefix=map_prefix.resolve(),
+        track_csv=args.track_csv.resolve(),
+        trajectory_csv=trajectory_csv.resolve(),
+        tracking_log=tracking_log.resolve(),
+        target_speed=args.target_speed,
+        avoidance_speed=args.avoidance_speed,
+        start_x=args.sx,
+        start_y=args.sy,
+        start_theta=args.stheta,
+        preset=preset,
+        enable_rviz=True,
+    )
+
+    print("\n" + "=" * 72)
+    print(f"RViz trial {trial_name}: map={map_prefix}")
+    print(f"Tracking log: {tracking_log}")
+    print(
+        "Obstacles: "
+        + ", ".join(
+            f"({obs['center_x_m']:.2f},{obs['center_y_m']:.2f})"
+            for obs in obstacle_summary["obstacles"]
+        )
+    )
+    print("Launch command:")
+    print(" ".join(launch_cmd))
+    proc = subprocess.Popen(launch_cmd, preexec_fn=os.setsid)
+    if args.timeout <= 0.0:
+        return proc.wait()
+    start_time = time.time()
+    try:
+        while time.time() - start_time < args.timeout:
+            if proc.poll() is not None:
+                return int(proc.returncode)
+            time.sleep(args.poll_interval)
+        print(f"RViz timeout reached ({args.timeout:.1f}s); stopping trial.")
+        terminate_process_group(proc)
+        return 0
+    except KeyboardInterrupt:
+        terminate_process_group(proc)
+        return 130
+
+
 def write_outputs(batch_dir: Path, args: argparse.Namespace, preset: FrenetPreset, results: list[TrialResult]) -> None:
+    """写出批量测试的 CSV/JSON 汇总。
+
+    Args:
+        batch_dir: 当前批次输出目录。
+        args: CLI 参数命名空间。
+        preset: 本批次使用的 Frenet 参数预设。
+        results: 已完成 trial 的结果列表。
+
+    Returns:
+        None。每个 trial 后都会覆盖写出最新汇总，方便长任务中途查看。
+    """
     summary_csv = batch_dir / "summary.csv"
     fieldnames = list(asdict(results[0]).keys()) if results else list(TrialResult.__dataclass_fields__.keys())
     with summary_csv.open("w", newline="", encoding="utf-8") as f:
@@ -607,7 +797,18 @@ def write_outputs(batch_dir: Path, args: argparse.Namespace, preset: FrenetPrese
 
 
 def parse_args() -> argparse.Namespace:
+    """解析随机障碍鲁棒性测试 CLI 参数。
+
+    Returns:
+        `argparse.Namespace`，包含 batch/rviz 模式、速度、障碍数量、输出路径等。
+    """
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode",
+        choices=("batch", "rviz"),
+        default="batch",
+        help="batch runs scored headless trials; rviz launches one generated seed with RViz",
+    )
     parser.add_argument("--repo-root", type=Path, default=CONTAINER_PKG)
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--seed-start", type=int, default=0)
@@ -649,6 +850,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """脚本入口。
+
+    Returns:
+        进程退出码。batch 模式下全部 trial 成功返回 0，否则返回 1；
+        rviz 模式透传 `ros2 launch` 的退出码。
+    """
     args = parse_args()
     args.repo_root = args.repo_root.resolve()
     batch_name = args.batch_name or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -664,6 +871,9 @@ def main() -> int:
         f"obstacles={args.obstacle_count}"
     )
     print(f"Preset: {json.dumps(asdict(preset), sort_keys=True)}")
+
+    if args.mode == "rviz":
+        return run_rviz_seed(args, batch_dir, int(args.seed_start), preset)
 
     results: list[TrialResult] = []
     for offset in range(max(1, int(args.trials))):

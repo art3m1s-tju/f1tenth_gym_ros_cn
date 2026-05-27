@@ -2,6 +2,8 @@
 # Batch robustness test for Frenet static-obstacle avoidance.
 # Usage:
 #   ./run_frenet_random_obstacle_robustness.sh
+#   ./run_frenet_random_obstacle_robustness.sh --rviz --seed 0 --target-speed 3.0 --avoidance-speed 1.2
+#   ./run_frenet_random_obstacle_robustness.sh --rviz --seed 0 --timeout 45
 #   ./run_frenet_random_obstacle_robustness.sh --trials 1 --laps 1 --timeout 80
 #   ./run_frenet_random_obstacle_robustness.sh --target-speed 3.0 --avoidance-speed 1.2
 
@@ -11,9 +13,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${F1TENTH_DOCKER_IMAGE:-f1tenth_gym_ros:latest}"
 CONTAINER_PKG="/sim_ws/src/f1tenth_gym_ros"
 
+MODE="${FRENET_RANDOM_MODE:-batch}"
 TRIALS="${FRENET_RANDOM_TRIALS:-10}"
 LAPS="${FRENET_RANDOM_LAPS:-3}"
-TIMEOUT="${FRENET_RANDOM_TIMEOUT:-240}"
+TIMEOUT="${FRENET_RANDOM_TIMEOUT:-}"
+TIMEOUT_EXPLICIT="false"
 STUCK_DURATION="${FRENET_RANDOM_STUCK_DURATION:-3.0}"
 TARGET_SPEED="${FRENET_TARGET_SPEED:-3.0}"
 AVOIDANCE_SPEED="${FRENET_AVOIDANCE_SPEED:-1.2}"
@@ -34,18 +38,21 @@ Usage: $0 [options]
 Options:
   --trials N              Number of random seeds to run. Default: ${TRIALS}
   --laps N                Required completed laps per seed. Default: ${LAPS}
-  --timeout SEC           Timeout per seed. Default: ${TIMEOUT}
+  --timeout SEC           Timeout per seed. Default: 240 in batch, 45 in RViz.
+                          Use --timeout 0 in RViz to keep running until manual close.
   --stuck-duration SEC    Stop/low-speed duration treated as stuck. Default: ${STUCK_DURATION}
   --target-speed MPS      LQR global target speed. Default: ${TARGET_SPEED}
   --avoidance-speed MPS   Frenet avoidance speed limit. Default: ${AVOIDANCE_SPEED}
   --obstacle-count N      Random obstacles per seed. Default: ${OBSTACLE_COUNT}
   --obstacle-size M       Square obstacle size in meters. Default: ${OBSTACLE_SIZE}
   --seed-start N          First random seed. Default: ${SEED_START}
+  --seed N                Alias for --seed-start in --rviz mode.
   --min-start-distance M  Minimum obstacle distance from start. Default: ${MIN_START_DISTANCE}
   --min-separation M      Minimum obstacle separation. Default: ${MIN_SEPARATION}
   --batch-name NAME       Output batch folder name. Default: timestamp
   --sx X --sy Y --stheta R
                           Initial vehicle pose. Default: ${START_X}, ${START_Y}, ${START_THETA}
+  --rviz                  Generate one random seed and launch it with RViz.
   -h, --help              Show this help.
 
 Output:
@@ -64,9 +71,9 @@ while [[ $# -gt 0 ]]; do
     --laps=*)
       LAPS="${1#*=}"; shift ;;
     --timeout)
-      TIMEOUT="$2"; shift 2 ;;
+      TIMEOUT="$2"; TIMEOUT_EXPLICIT="true"; shift 2 ;;
     --timeout=*)
-      TIMEOUT="${1#*=}"; shift ;;
+      TIMEOUT="${1#*=}"; TIMEOUT_EXPLICIT="true"; shift ;;
     --stuck-duration|--stuck-duration-s)
       STUCK_DURATION="$2"; shift 2 ;;
     --stuck-duration=*|--stuck-duration-s=*)
@@ -90,6 +97,10 @@ while [[ $# -gt 0 ]]; do
     --seed-start)
       SEED_START="$2"; shift 2 ;;
     --seed-start=*)
+      SEED_START="${1#*=}"; shift ;;
+    --seed)
+      SEED_START="$2"; shift 2 ;;
+    --seed=*)
       SEED_START="${1#*=}"; shift ;;
     --min-start-distance|--min-start-distance-m)
       MIN_START_DISTANCE="$2"; shift 2 ;;
@@ -115,6 +126,10 @@ while [[ $# -gt 0 ]]; do
       START_THETA="$2"; shift 2 ;;
     --stheta=*)
       START_THETA="${1#*=}"; shift ;;
+    --rviz)
+      MODE="rviz"; shift ;;
+    --batch|--headless)
+      MODE="batch"; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -125,7 +140,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "${TIMEOUT}" ]]; then
+  if [[ "${MODE}" == "rviz" ]]; then
+    TIMEOUT="45"
+  else
+    TIMEOUT="240"
+  fi
+fi
+
 RUNNER_ARGS=(
+  --mode "${MODE}"
   --repo-root "${CONTAINER_PKG}"
   --trials "${TRIALS}"
   --laps "${LAPS}"
@@ -149,24 +173,67 @@ fi
 
 printf -v RUNNER_ARGS_QUOTED ' %q' "${RUNNER_ARGS[@]}"
 
+TEST_CMD=""
+if [[ "${MODE}" == "batch" ]]; then
+  TEST_CMD="PYTHONDONTWRITEBYTECODE=1 python3 -m pytest ${CONTAINER_PKG}/test/test_frenet_planner.py ${CONTAINER_PKG}/test/test_frenet_random_robustness.py -q"
+else
+  TEST_CMD=":"
+fi
+
 read -r -d '' INNER_CMD <<EOF || true
 set -e
 cd /sim_ws
 source /opt/ros/foxy/setup.bash
 colcon build --symlink-install
 source /sim_ws/install/local_setup.bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-  ${CONTAINER_PKG}/test/test_frenet_planner.py \
-  ${CONTAINER_PKG}/test/test_frenet_random_robustness.py \
-  -q
+${TEST_CMD}
 python3 ${CONTAINER_PKG}/code/lqr_sweep/frenet_random_robustness.py${RUNNER_ARGS_QUOTED}
 EOF
+
+case "${MODE}" in
+  batch|rviz)
+    ;;
+  *)
+    echo "[ERROR] mode must be batch or rviz, got: ${MODE}"
+    exit 2
+    ;;
+esac
+
+if [[ "${MODE}" == "rviz" && -z "${DISPLAY:-}" ]]; then
+  echo "[ERROR] DISPLAY is empty. RViz mode needs X11 forwarding. Use batch mode or export DISPLAY first."
+  exit 1
+fi
+
+DOCKER_ARGS=(
+  --rm
+  --entrypoint /bin/bash
+  -v "${REPO_ROOT}:${CONTAINER_PKG}"
+)
+
+if [[ "${MODE}" == "rviz" ]]; then
+  DOCKER_ARGS=(
+    --rm
+    -it
+    --entrypoint /bin/bash
+    -e "DISPLAY=${DISPLAY}"
+    -e "QT_X11_NO_MITSHM=1"
+    -v /tmp/.X11-unix:/tmp/.X11-unix
+    -v "${REPO_ROOT}:${CONTAINER_PKG}"
+  )
+  if [[ -n "${XAUTHORITY:-}" && -f "${XAUTHORITY}" ]]; then
+    DOCKER_ARGS+=(
+      -e "XAUTHORITY=/tmp/.docker.xauth"
+      -v "${XAUTHORITY}:/tmp/.docker.xauth:ro"
+    )
+  fi
+fi
 
 echo "=========================================="
 echo " Frenet random obstacle robustness"
 echo "=========================================="
 echo " repo:            ${REPO_ROOT}"
 echo " image:           ${IMAGE}"
+echo " mode:            ${MODE}"
 echo " trials/laps:     ${TRIALS}/${LAPS}"
 echo " timeout:         ${TIMEOUT}s per trial"
 echo " stuck_duration:  ${STUCK_DURATION}s"
@@ -176,8 +243,6 @@ echo " seed_start:      ${SEED_START}"
 echo " start_pose:      (${START_X}, ${START_Y}, ${START_THETA})"
 echo "=========================================="
 
-docker run --rm \
-  --entrypoint /bin/bash \
-  -v "${REPO_ROOT}:${CONTAINER_PKG}" \
+docker run "${DOCKER_ARGS[@]}" \
   "${IMAGE}" \
   -lc "${INNER_CMD}"
