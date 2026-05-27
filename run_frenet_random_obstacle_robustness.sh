@@ -30,6 +30,7 @@ BATCH_NAME="${FRENET_RANDOM_BATCH_NAME:-}"
 START_X="${FRENET_START_X:-3.0}"
 START_Y="${FRENET_START_Y:-5.0}"
 START_THETA="${FRENET_START_THETA:-3.1416}"
+RECORD_ROSBAG="${FRENET_RECORD_ROSBAG:-true}"
 
 usage() {
   cat <<USAGE
@@ -52,6 +53,8 @@ Options:
   --batch-name NAME       Output batch folder name. Default: timestamp
   --sx X --sy Y --stheta R
                           Initial vehicle pose. Default: ${START_X}, ${START_Y}, ${START_THETA}
+  --record-rosbag         Record all ROS topics for every batch trial. Default.
+  --no-record-rosbag      Disable rosbag recording to save disk space.
   --rviz                  Generate one random seed and launch it with RViz.
   -h, --help              Show this help.
 
@@ -126,6 +129,10 @@ while [[ $# -gt 0 ]]; do
       START_THETA="$2"; shift 2 ;;
     --stheta=*)
       START_THETA="${1#*=}"; shift ;;
+    --record-rosbag)
+      RECORD_ROSBAG="true"; shift ;;
+    --no-record-rosbag)
+      RECORD_ROSBAG="false"; shift ;;
     --rviz)
       MODE="rviz"; shift ;;
     --batch|--headless)
@@ -169,6 +176,11 @@ RUNNER_ARGS=(
 
 if [[ -n "${BATCH_NAME}" ]]; then
   RUNNER_ARGS+=(--batch-name "${BATCH_NAME}")
+fi
+if [[ "${RECORD_ROSBAG}" == "true" ]]; then
+  RUNNER_ARGS+=(--record-rosbag)
+else
+  RUNNER_ARGS+=(--no-record-rosbag)
 fi
 
 printf -v RUNNER_ARGS_QUOTED ' %q' "${RUNNER_ARGS[@]}"
@@ -241,6 +253,7 @@ echo " target/avoid:    ${TARGET_SPEED}/${AVOIDANCE_SPEED} m/s"
 echo " obstacles:       count=${OBSTACLE_COUNT}, size=${OBSTACLE_SIZE}m"
 echo " seed_start:      ${SEED_START}"
 echo " start_pose:      (${START_X}, ${START_Y}, ${START_THETA})"
+echo " record_rosbag:   ${RECORD_ROSBAG}"
 echo "=========================================="
 
 docker run "${DOCKER_ARGS[@]}" \

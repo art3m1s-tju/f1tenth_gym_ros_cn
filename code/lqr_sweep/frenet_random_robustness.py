@@ -13,6 +13,7 @@ import json
 import math
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -94,6 +95,8 @@ class TrialResult:
         map_prefix: 生成地图路径前缀，不带扩展名。
         tracking_log: LQR tracking CSV 路径。
         launch_log: ROS launch 日志路径。
+        rosbag_dir: 可选 rosbag 输出目录。
+        rosbag_recorded: 是否实际写出了 rosbag 文件。
         duration_s: tracking 日志覆盖时间，单位 s。
         zero_limit_runs: 0 限速卡住次数。
         low_speed_stuck_runs: 低速卡住次数。
@@ -114,6 +117,8 @@ class TrialResult:
     map_prefix: str
     tracking_log: str
     launch_log: str
+    rosbag_dir: str
+    rosbag_recorded: bool
     duration_s: float
     zero_limit_runs: int
     low_speed_stuck_runs: int
@@ -542,6 +547,42 @@ def terminate_process_group(proc: subprocess.Popen) -> None:
         pass
 
 
+def start_rosbag_recording(logs_dir: Path, trial_name: str) -> tuple[subprocess.Popen | None, Path]:
+    """启动单个 trial 的 rosbag 记录进程。
+
+    Args:
+        logs_dir: 当前 trial 的日志目录。
+        trial_name: 当前 trial 名称，用于构造 bag 目录。
+
+    Returns:
+        `(proc, bag_dir)`。如果当前环境没有 `ros2` 或 `ros2 bag` 启动失败，
+        `proc` 返回 `None`，调用方继续执行 CSV/log 测试。
+    """
+    bag_dir = logs_dir / "rosbag" / trial_name
+    bag_log = logs_dir / "rosbag.log"
+    if shutil.which("ros2") is None:
+        bag_log.write_text("ros2 executable not found; skipped rosbag recording.\n", encoding="utf-8")
+        return None, bag_dir
+    bag_dir.parent.mkdir(parents=True, exist_ok=True)
+    if bag_dir.exists():
+        for child in bag_dir.iterdir():
+            if child.is_file():
+                child.unlink()
+    cmd = ["ros2", "bag", "record", "-a", "-o", str(bag_dir)]
+    try:
+        log_file = bag_log.open("w", encoding="utf-8")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+        )
+    except OSError as exc:
+        bag_log.write_text(f"failed to start rosbag recording: {exc}\n", encoding="utf-8")
+        return None, bag_dir
+    return proc, bag_dir
+
+
 def failure_reason(
     tracking: TrackingSummary,
     launch: LaunchSummary,
@@ -624,6 +665,8 @@ def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: Fren
     )
     start_time = time.time()
     timed_out = False
+    rosbag_proc: subprocess.Popen | None = None
+    rosbag_dir = tracking_log.parent / "rosbag" / trial_name
     with launch_log.open("w", encoding="utf-8") as log_file:
         proc = subprocess.Popen(
             launch_cmd,
@@ -631,6 +674,8 @@ def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: Fren
             stderr=subprocess.STDOUT,
             preexec_fn=os.setsid,
         )
+        if args.record_rosbag:
+            rosbag_proc, rosbag_dir = start_rosbag_recording(tracking_log.parent, trial_name)
         try:
             while time.time() - start_time < args.timeout:
                 time.sleep(args.poll_interval)
@@ -654,6 +699,8 @@ def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: Fren
                 timed_out = True
                 print("  timeout reached; stopping trial")
         finally:
+            if rosbag_proc is not None:
+                terminate_process_group(rosbag_proc)
             terminate_process_group(proc)
 
     tracking = summarize_tracking_log(tracking_log, args.sx, args.sy, reference_xy)
@@ -680,6 +727,8 @@ def run_trial(args: argparse.Namespace, batch_dir: Path, seed: int, preset: Fren
         map_prefix=str(map_prefix),
         tracking_log=str(tracking_log),
         launch_log=str(launch_log),
+        rosbag_dir=str(rosbag_dir),
+        rosbag_recorded=bool(rosbag_dir.exists() and any(rosbag_dir.rglob("*"))),
         duration_s=tracking.duration_s,
         zero_limit_runs=tracking.zero_limit_runs,
         low_speed_stuck_runs=tracking.low_speed_stuck_runs,
@@ -846,6 +895,19 @@ def parse_args() -> argparse.Namespace:
         default=CONTAINER_PKG / "code" / "outputs" / "frenet_random_obstacle_robustness",
     )
     parser.add_argument("--batch-name", default="")
+    parser.set_defaults(record_rosbag=True)
+    parser.add_argument(
+        "--record-rosbag",
+        dest="record_rosbag",
+        action="store_true",
+        help="record all ROS topics for each batch trial; enabled by default",
+    )
+    parser.add_argument(
+        "--no-record-rosbag",
+        dest="record_rosbag",
+        action="store_false",
+        help="disable rosbag recording to save disk space",
+    )
     return parser.parse_args()
 
 

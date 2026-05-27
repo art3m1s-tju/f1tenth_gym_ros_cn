@@ -24,11 +24,11 @@ def test_compute_frenet_preset_scales_high_speed_parameters():
     assert preset.grid_forward_m == 20.0
     assert preset.activation_max_m > 8.0
     assert math.isclose(preset.approach_extra_m, 0.75)
-    assert math.isclose(preset.activation_path_margin_m, 0.50)
+    assert math.isclose(preset.activation_path_margin_m, 1.25)
     assert math.isclose(preset.centerline_return_lookahead_m, 3.5)
     assert preset.reuse_timeout_s == 2.0
     assert math.isclose(preset.hold_min_remaining_m, 0.90)
-    assert math.isclose(preset.max_published_path_length_m, 5.4)
+    assert math.isclose(preset.max_published_path_length_m, 6.6)
 
 
 def test_compute_frenet_preset_shortens_low_speed_centerline_return():
@@ -59,7 +59,7 @@ def test_build_launch_cmd_can_enable_rviz(tmp_path):
     assert "enable_rviz:=false" not in cmd
     assert all(arg in cmd for arg in frenet_static_test_launch_args(preset, 1.2))
     assert "frenet_centerline_return_lookahead_m:=3.500" in cmd
-    assert "frenet_max_published_path_length_m:=5.400" in cmd
+    assert "frenet_max_published_path_length_m:=6.600" in cmd
     assert "frenet_candidate_profile_max_jump_m:=0.35" in cmd
 
 
