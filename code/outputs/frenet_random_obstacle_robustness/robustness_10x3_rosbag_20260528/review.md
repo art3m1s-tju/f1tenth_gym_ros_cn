@@ -258,6 +258,39 @@ docker run --rm --entrypoint /bin/bash \
 
 剩余瓶颈判断：profile 生成已经不是主要问题。下一步真正影响整帧规划耗时的地方大概率是每条候选的 `occupancy.query_path()`，其中包含路径加密、扫掠通道采样、坐标转换、栅格碰撞和 clearance 查询。后续如果还要继续提速，应优先设计批量 `query_paths`，一次处理多条候选并按候选分组汇总 collision/min_clearance。
 
+### 2026-05-28 追加复测：seed 001-003 当前 NumPy 版本
+
+复测命令：
+
+```bash
+./run_frenet_random_obstacle_robustness.sh \
+  --trials 3 \
+  --laps 3 \
+  --timeout 180 \
+  --stuck-duration 3.0 \
+  --target-speed 3.0 \
+  --avoidance-speed 1.2 \
+  --obstacle-count 2 \
+  --obstacle-size 0.4 \
+  --seed-start 1 \
+  --batch-name numpy_vectorized_seeds001_003_baseline \
+  --no-record-rosbag
+```
+
+结果：
+
+| Seed | 结果 | 失败原因 | 规划周期数 | 规划耗时 min/mean/p95/max | no-safe 日志数 |
+|---:|---|---|---:|---|---:|
+| 001 | 失败 | `stuck_zero_speed_limit` | 212 | `0.509 / 0.754 / 0.802 / 0.967 s` | 203 |
+| 002 | 失败 | `collision` | 6 | `0.725 / 0.858 / 0.910 / 1.073 s` | 1 |
+| 003 | 失败 | `collision` | 4 | `0.761 / 0.849 / 0.821 / 1.014 s` | 1 |
+
+seed `001` 的随机地图与旧 `robustness_10x3_rosbag_20260528` 中通过的 seed `001` 完全相同，障碍物仍为 `(-8.7547922, 3.3017473)` 和 `(-4.44, -5.0)`。旧实验中 seed `001` 通过，规划候选数为 `110`，规划耗时 `0.133 / 0.449 / 0.575 s`；当前 NumPy 版本默认候选数为 `666`，规划耗时变为 `0.509 / 0.754 / 0.967 s`，并长期进入 no-safe stop。
+
+额外试验：临时把高速 preset 的 `v_step` 从 `0.80` 加密到 `0.60`，seed `001` 候选数变为 `777`，规划耗时 `0.541 / 0.638 / 0.772 s`，但 `10.1 s` 内发生碰撞，未改善鲁棒性。因此该加密参数没有保留。
+
+结论：当前 profile 生成的 NumPy 向量化还不足以支撑 666 条候选的实时规划。整帧耗时仍主要被每条候选的世界坐标轨迹检查和占据栅格碰撞查询限制；继续增加采样密度会扩大风险，不应作为下一步主方向。下一步应优先优化或批量化 `occupancy.query_path()`，或者在保持实时性的前提下回退到更小候选束并单独处理无解恢复。
+
 1. 增加停车近障碍物时的 recovery mode。
 
    可选方向包括低速倒车/后退、临时扩大横向搜索、解除某些前向进度约束，或者专门生成 escape path。Seed `008` 应作为主要回归测试。
