@@ -19,10 +19,11 @@ RUN mkdir -p /root/.pip && \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git nano vim tmux \
-        python3-pip python3-dev python3-setuptools python3-wheel \
+        python3-pip python3-dev python3-setuptools python3-wheel python3-pytest \
         build-essential cmake \
         libeigen3-dev \
         python3-numpy python3-scipy python3-pandas python3-pil python3-matplotlib \
+        ros-foxy-ament-copyright ros-foxy-ament-flake8 ros-foxy-ament-pep257 \
         ros-foxy-rviz2 && \
     rm -rf /var/lib/apt/lists/*
 RUN apt-get update && apt-get -y dist-upgrade && rm -rf /var/lib/apt/lists/*
