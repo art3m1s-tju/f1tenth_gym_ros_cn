@@ -27,7 +27,7 @@ def test_compute_frenet_preset_scales_high_speed_parameters():
     assert math.isclose(preset.activation_path_margin_m, 1.25)
     assert math.isclose(preset.centerline_return_lookahead_m, 3.5)
     assert preset.reuse_timeout_s == 2.0
-    assert math.isclose(preset.hold_min_remaining_m, 0.90)
+    assert math.isclose(preset.hold_min_remaining_m, 2.10)
     assert math.isclose(preset.max_published_path_length_m, 6.6)
 
 

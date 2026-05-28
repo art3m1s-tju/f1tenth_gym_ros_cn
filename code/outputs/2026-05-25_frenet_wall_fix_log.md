@@ -1642,3 +1642,112 @@ bash -n: passed
 py_compile: passed
 docker pytest: 7 passed
 ```
+
+## 2026-05-28 更新：完整候选缓存与安全裕度重调
+
+背景：
+
+- `rollback/frenet-063ef43` 版本在随机障碍 seed001 RViz 观察中，第一圈可通过，
+  后续圈数在障碍物前出现停住/无解现象；
+- 对同参数录制 rosbag 后，headless 3 圈可通过，但日志出现短暂
+  `No safe Frenet candidate`；
+- 关键命令参数：
+
+```text
+./run_frenet_random_obstacle_robustness.sh \
+  --rviz \
+  --seed 1 \
+  --target-speed 3.0 \
+  --avoidance-speed 1.5 \
+  --obstacle-count 2 \
+  --obstacle-size 0.4 \
+  --timeout 0 \
+  --no-record-rosbag
+```
+
+定位结论：
+
+- seed001 第一个障碍物位于参考线附近 `s≈9.22m, d≈-0.08m`；
+- 原实现把完整 Frenet 候选轨迹裁剪成发布窗口后，同时把裁剪后的短路径写入
+  `last_safe_candidate_xy`；
+- 因此完整候选虽然可能已经越过障碍物，但缓存里只剩发布给 LQR 的前段路径；
+- 当 held path 剩余长度低于 `held_path_min_remaining_m` 时，planner 被迫在障碍物
+  前重新规划；如果此时车辆已经进入贴障碍物/贴墙的窄通道，候选束会全部被
+  collision reject；
+- 这属于“发布窗口”和“安全缓存”职责混用，不是单纯 LQR 跟踪问题。
+
+代码改动：
+
+- `FrenetStaticObstaclePlanner` 成功选择候选后，`last_safe_candidate_xy` 改为缓存
+  完整 `candidate.xy`；
+- hold/reuse 复检前，先从完整缓存按当前车辆位置裁出剩余完整路径；
+- collision/clearance 复检作用在剩余完整路径上；
+- 发布给 LQR 时仍保留滑动窗口裁剪，避免 LQR 执行过长、过旧的远端轨迹。
+
+安全裕度重调：
+
+- RViz 模型车宽 `width=0.2032m`，半宽约 `0.102m`；
+- 原高速随机障碍参数：
+
+```text
+grid_inflation_radius_m = 0.18
+corridor_radius_m = 0.20
+min_clearance_m = 0.06
+横向硬裕度合计约 0.44m
+```
+
+- 该值明显大于车体半宽，且对 0.4m 方形障碍物要求路径中心线到障碍物中心约
+  `0.64m`；
+- 最终采用：
+
+```text
+grid_inflation_radius_m = 0.12
+corridor_radius_m = 0.16
+min_clearance_m = 0.04
+横向硬裕度合计约 0.32m
+0.4m 方形障碍物对应中心距离约 0.52m
+```
+
+- 曾试验更小组合 `0.10 + 0.14 + 0.04 = 0.28m`，seed001 可通过但
+  `No safe` 停顿变长，推测更容易选到贴障碍/贴墙通道，因此未保留。
+
+重规划距离调整：
+
+- 原 `hold_min_remaining_m = target * 0.30`，3m/s 下为 `0.90m`；
+- 在避障场景中等到缓存路径只剩约 0.9m 再重规划偏晚；
+- 调整为 `max(1.20, min(2.20, target * 0.70))`，3m/s 下为 `2.10m`；
+- 目标是在缓存路径仍有足够前向空间时提前生成下一束候选，避免贴障碍物后才
+  重新规划。
+
+验证：
+
+```text
+docker/runner 内 pytest: 44 passed
+
+./run_frenet_random_obstacle_robustness.sh \
+  --trials 3 \
+  --laps 3 \
+  --timeout 180 \
+  --stuck-duration 3.0 \
+  --target-speed 3.0 \
+  --avoidance-speed 1.5 \
+  --obstacle-count 2 \
+  --obstacle-size 0.4 \
+  --seed-start 1 \
+  --batch-name tuned_clearance_mid_hold2_seeds001_003 \
+  --no-record-rosbag
+```
+
+结果：
+
+```text
+seed001: PASS, completed_laps=3, zero_limit_runs=0, no_safe_stop_count=0, ego_collision_count=0
+seed002: PASS, completed_laps=3, zero_limit_runs=0, no_safe_stop_count=0, ego_collision_count=0
+seed003: PASS, completed_laps=3, zero_limit_runs=0, no_safe_stop_count=0, ego_collision_count=0
+```
+
+注意：
+
+- 这次修复没有解决所有候选选择策略问题；贴障碍物侧的候选仍可能被选中；
+- 后续若继续提高速度或增加障碍物密度，应继续评估 clearance-aware/channel-aware
+  选择策略，而不是只靠缩小安全裕度。

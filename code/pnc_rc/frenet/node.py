@@ -632,7 +632,7 @@ class FrenetStaticObstaclePlanner(Node):
                 keep_debug=False,
             )
             return
-        self.last_safe_candidate_xy = np.asarray(anchored_candidate, dtype=float).copy()
+        self.last_safe_candidate_xy = np.asarray(candidate.xy, dtype=float).copy()
         self.last_safe_candidate_time = now
         self.last_selected_candidate_s_profile = np.asarray(candidate.s, dtype=float).copy()
         self.last_selected_candidate_d_profile = np.asarray(candidate.d, dtype=float).copy()
@@ -987,14 +987,27 @@ class FrenetStaticObstaclePlanner(Node):
             vehicle_pose: 车辆世界位姿 `(x, y, yaw)`。
 
         Returns:
-            若缓存存在且仍满足硬碰撞约束，返回
-            `(candidate_xy, age_s, min_clearance_m)`；否则返回 `None`。
+            若缓存存在且剩余轨迹仍满足硬碰撞约束，返回
+            `(remaining_candidate_xy, age_s, min_clearance_m)`；否则返回 `None`。
         """
         if self.last_safe_candidate_xy is None or self.last_safe_candidate_time is None:
             return None
         age = now - self.last_safe_candidate_time
-        collision, min_clearance = occupancy.query_path(
+        if self.latest_odom is not None:
+            position, _ = self._odom_pose(self.latest_odom)
+        else:
+            position = np.array([vehicle_pose[0], vehicle_pose[1]], dtype=float)
+        remaining_candidate = trim_path_to_position(
             self.last_safe_candidate_xy,
+            position,
+            min_remaining_length_m=0.0,
+            anchor_lookahead_m=0.0,
+            max_remaining_length_m=0.0,
+        )
+        if len(remaining_candidate) < 2:
+            return None
+        collision, min_clearance = occupancy.query_path(
+            remaining_candidate,
             vehicle_pose,
             self.planner_config.corridor_radius_m,
             self.planner_config.corridor_sample_step_m,
@@ -1004,7 +1017,7 @@ class FrenetStaticObstaclePlanner(Node):
         )
         if collision or min_clearance < self.planner_config.min_clearance_m:
             return None
-        return self.last_safe_candidate_xy, age, float(min_clearance)
+        return remaining_candidate, age, float(min_clearance)
 
     def _trim_cached_candidate(
         self,
