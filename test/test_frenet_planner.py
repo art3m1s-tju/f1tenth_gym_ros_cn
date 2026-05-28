@@ -7,7 +7,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
 from pnc_rc.frenet.planner import (
-    CandidatePath,
     FrenetPlanStats,
     FrenetPlannerConfig,
     FrenetState,
@@ -23,12 +22,12 @@ from pnc_rc.frenet.planner import (
     initial_frenet_state,
     local_static_map_occupancy,
     path_pose_error,
+    path_continuity_cost,
     plan_frenet_path,
     polyline_length,
     sample_reference_segment,
     sample_return_to_centerline_segment,
     score_candidate,
-    select_temporally_consistent_candidate,
     solve_quartic_longitudinal,
     solve_quintic_lateral,
     speed_based_activation_lookahead,
@@ -865,135 +864,64 @@ def test_candidate_score_prefers_smoother_curvature_profile_when_safe():
     assert wavy.cost > smooth.cost
 
 
-def _candidate_with_d(
-    d_final: float,
-    cost: float,
-    clearance: float,
-    d_profile=None,
-    s_profile=None,
-) -> CandidatePath:
-    d = (
-        np.asarray(d_profile, dtype=float)
-        if d_profile is not None
-        else np.array([0.0, d_final], dtype=float)
-    )
-    s = (
-        np.asarray(s_profile, dtype=float)
-        if s_profile is not None
-        else np.linspace(0.0, 1.0, len(d))
-    )
-    return CandidatePath(
-        xy=np.zeros((len(d), 2), dtype=float),
-        s=s,
-        d=d,
-        s_dot=np.ones(len(d), dtype=float),
-        d_dot=np.zeros(len(d), dtype=float),
-        cost=cost,
-        min_clearance_m=clearance,
-        max_curvature=0.0,
+def test_candidate_score_prefers_nearby_previous_path_shape():
+    s_values = np.linspace(0.0, 4.0, 40)
+    reference_xy = np.column_stack([s_values, np.full_like(s_values, 0.5)])
+    nearby_xy = np.column_stack([s_values, np.full_like(s_values, 0.55)])
+    far_xy = np.column_stack([s_values, np.full_like(s_values, -0.5)])
+    d_values = np.zeros_like(s_values)
+    s_dot_values = np.full_like(s_values, 1.0)
+    d_dot_values = np.zeros_like(s_values)
+    jerks = np.zeros_like(s_values)
+    config = FrenetPlannerConfig(
+        target_speed=1.0,
+        weight_obstacle_clearance=0.0,
+        weight_curvature=0.0,
+        weight_curvature_rate=0.0,
+        weight_path_continuity=2.0,
+        path_continuity_lookahead_m=3.0,
+        path_continuity_sample_step_m=0.25,
     )
 
-
-def test_temporal_selection_uses_profile_continuity():
-    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
-    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
-    raw_best = _candidate_with_d(
-        1.4,
-        cost=1.0,
-        clearance=0.35,
-        s_profile=previous_s,
-        d_profile=np.array([0.35, 0.9, 1.2, 1.4], dtype=float),
+    nearby = score_candidate(
+        nearby_xy,
+        s_values,
+        d_values,
+        s_dot_values,
+        d_dot_values,
+        jerks,
+        jerks,
+        duration=2.0,
+        min_clearance=0.35,
+        config=config,
+        continuity_reference_xy=reference_xy,
     )
-    same_channel = _candidate_with_d(
-        0.52,
-        cost=4.0,
-        clearance=0.34,
-        s_profile=previous_s,
-        d_profile=np.array([0.34, 0.43, 0.48, 0.52], dtype=float),
-    )
-
-    selected, reason = select_temporally_consistent_candidate(
-        raw_best,
-        [raw_best, same_channel],
-        previous_s_profile=previous_s,
-        previous_d_profile=previous_d,
-        profile_consistency_weight=20.0,
-        profile_max_jump_m=0.35,
-        profile_lookahead_m=3.0,
-        profile_unlock_clearance_gain_m=0.12,
-        safe_clearance_m=0.30,
+    far = score_candidate(
+        far_xy,
+        s_values,
+        d_values,
+        s_dot_values,
+        d_dot_values,
+        jerks,
+        jerks,
+        duration=2.0,
+        min_clearance=0.35,
+        config=config,
+        continuity_reference_xy=reference_xy,
     )
 
-    assert selected is same_channel
-    assert reason == "same_profile"
-
-
-def test_temporal_selection_unlocks_for_clearance_gain():
-    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
-    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
-    safer_jump = _candidate_with_d(
-        1.4,
-        cost=1.0,
-        clearance=0.50,
-        s_profile=previous_s,
-        d_profile=np.array([0.35, 0.9, 1.2, 1.4], dtype=float),
+    assert path_continuity_cost(
+        nearby_xy,
+        reference_xy,
+        lookahead_m=3.0,
+        sample_step_m=0.25,
+    ) < path_continuity_cost(
+        far_xy,
+        reference_xy,
+        lookahead_m=3.0,
+        sample_step_m=0.25,
     )
-    same_channel = _candidate_with_d(
-        0.52,
-        cost=4.0,
-        clearance=0.32,
-        s_profile=previous_s,
-        d_profile=np.array([0.34, 0.43, 0.48, 0.52], dtype=float),
-    )
-
-    selected, reason = select_temporally_consistent_candidate(
-        safer_jump,
-        [safer_jump, same_channel],
-        previous_s_profile=previous_s,
-        previous_d_profile=previous_d,
-        profile_consistency_weight=20.0,
-        profile_max_jump_m=0.35,
-        profile_lookahead_m=3.0,
-        profile_unlock_clearance_gain_m=0.12,
-        safe_clearance_m=0.30,
-    )
-
-    assert selected is safer_jump
-    assert reason == "higher_clearance"
-
-
-def test_temporal_selection_keeps_raw_best_when_raw_cost_gap_is_too_high():
-    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
-    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
-    raw_best = _candidate_with_d(
-        1.4,
-        cost=1.0,
-        clearance=0.34,
-        s_profile=previous_s,
-        d_profile=np.array([0.35, 0.95, 1.2, 1.4], dtype=float),
-    )
-    smaller_jump = _candidate_with_d(
-        0.85,
-        cost=5.0,
-        clearance=0.33,
-        s_profile=previous_s,
-        d_profile=np.array([0.35, 0.72, 0.78, 0.85], dtype=float),
-    )
-
-    selected, reason = select_temporally_consistent_candidate(
-        raw_best,
-        [raw_best, smaller_jump],
-        previous_s_profile=previous_s,
-        previous_d_profile=previous_d,
-        profile_consistency_weight=20.0,
-        profile_max_jump_m=0.25,
-        profile_lookahead_m=3.0,
-        profile_unlock_clearance_gain_m=0.12,
-        safe_clearance_m=0.30,
-    )
-
-    assert selected is raw_best
-    assert reason == "lower_cost"
+    assert nearby.cost < far.cost
 
 
 def test_reference_path_open_mode_does_not_wrap_at_endpoint():

@@ -103,6 +103,9 @@ class FrenetPlannerConfig:
     weight_curvature: float = 0.4
     weight_curvature_rate: float = 8.0
     weight_lateral_shift: float = 1.2
+    weight_path_continuity: float = 2.0
+    path_continuity_lookahead_m: float = 3.0
+    path_continuity_sample_step_m: float = 0.25
     max_heading_jump: float = 0.65
     min_progress_step_m: float = 0.20
     max_initial_s_accel_mps2: float = 2.0
@@ -537,209 +540,6 @@ class FrenetPlanStats:
     best_clearance_m: float = 0.0
 
 
-def select_temporally_consistent_candidate(
-    best_candidate: CandidatePath,
-    safe_candidates: list[CandidatePath],
-    *,
-    previous_s_profile: np.ndarray | None = None,
-    previous_d_profile: np.ndarray | None = None,
-    profile_consistency_weight: float = 0.0,
-    profile_max_jump_m: float = 0.0,
-    profile_lookahead_m: float = 0.0,
-    profile_unlock_clearance_gain_m: float = 0.0,
-    safe_clearance_m: float,
-    max_cost_gap: float = 3.0,
-) -> tuple[CandidatePath, str]:
-    """用单一 adjusted cost 在 safe candidates 中选择横向连续轨迹。
-
-    `plan_frenet_path()` 已完成碰撞、clearance、曲率和前进性硬过滤；这里不再
-    额外维护“中心线左/右侧”状态机，也不再比较远端终点 `d`。这里只比较上一条
-    轨迹和当前候选在近距离重叠弧长内的 `d(s)` profile。若 raw best 的 clearance 已明显更好，则允许
-    立即解锁，避免稳定性惩罚把车粘在安全裕度不足的旧通道。
-
-    Args:
-        best_candidate: 原始 cost 最低的候选。
-        safe_candidates: 已通过硬碰撞/曲率/裕度检查的候选集合。
-        previous_s_profile: 上一条选中轨迹的弧长序列，用于通道 profile 对齐。
-        previous_d_profile: 上一条选中轨迹的横向偏移序列。
-        profile_consistency_weight: profile 平均横向误差惩罚权重。
-        profile_max_jump_m: raw best 超过该 profile 跳变时才考虑 clearance 解锁。
-        profile_lookahead_m: 从当前候选起点向前比较的 profile 长度，单位 m。
-        profile_unlock_clearance_gain_m: raw best 至少提升这么多 clearance 才允许
-            忽略连续性惩罚，单位 m。
-        safe_clearance_m: 期望安全裕度，单位 m。
-        max_cost_gap: 连续性选择相对 raw best 允许增加的最大原始 cost。
-
-    Returns:
-        `(selected_candidate, reason)`。`reason` 用于日志解释选择来源。
-    """
-    # 没有 safe candidates 时无法二次选择，直接保留 raw best。
-    if not safe_candidates:
-        return best_candidate, "raw"
-
-    # 整条 d(s) profile 连续性权重；用于抑制同侧内部左右摆动。
-    profile_weight = max(0.0, float(profile_consistency_weight))
-    # profile 最大跳变阈值；raw best 超过它时才认为 raw best 跳出了旧通道。
-    profile_jump_limit = max(0.0, float(profile_max_jump_m))
-    # profile 比较的前向距离；只比较近处轨迹，不比较整条远端尾巴。
-    profile_lookahead = max(0.0, float(profile_lookahead_m))
-    # raw best 至少多出这么多 clearance，才允许无视连续性惩罚直接切过去。
-    unlock_clearance_gain = max(0.0, float(profile_unlock_clearance_gain_m))
-
-    # key 是 safe_candidates 的下标，value 是 (平均 profile 误差, 最大 profile 误差)。
-    profile_metrics: dict[int, tuple[float, float]] = {}
-    # 只有上一条轨迹 profile 存在、lookahead 有效、profile 权重大于 0 时才计算 profile。
-    use_profile = (
-        previous_s_profile is not None
-        and previous_d_profile is not None
-        and profile_lookahead > 0.0
-        and profile_weight > 0.0
-    )
-    # 没有可比较的上一条 profile 时，不做二次选择，避免用远端终点 d 伪造连续性。
-    if not use_profile:
-        return best_candidate, "raw"
-
-    # 如果启用 profile 连续性，就逐条候选和上一条轨迹做 d(s) 对齐比较。
-    # enumerate 保留候选下标，后面 adjusted_cost 可以 O(1) 查 profile 误差。
-    for index, candidate in enumerate(safe_candidates):
-        # lateral_profile_error 会在重叠 s 区间内插值比较两条 d(s) 曲线。
-        metrics = lateral_profile_error(
-            candidate.s,
-            candidate.d,
-            previous_s_profile,
-            previous_d_profile,
-            profile_lookahead,
-        )
-        # 没有足够重叠区间时 metrics 为 None，该候选不参与 profile 二次选择。
-        if metrics is not None:
-            profile_metrics[index] = metrics
-
-    # 如果所有候选都和上一条轨迹没有重叠区间，保留 raw best。
-    if not profile_metrics:
-        return best_candidate, "raw"
-
-    def adjusted_cost(index: int, candidate: CandidatePath) -> float:
-        """计算原始 cost 和近距离 profile 连续性的统一排序值。"""
-        # 候选必须有 profile_metrics 才会参与 min()；这里直接取平均 profile 误差。
-        mean_error, _ = profile_metrics[index]
-        # 从原始 cost 开始，只加入近距离 profile 平均误差二次惩罚。
-        score = float(candidate.cost)
-        # profile 平均误差二次惩罚，抑制同一侧内部 d(s) 大幅跳变。
-        score += profile_weight * mean_error * mean_error
-        # 返回统一排序分数，分数越小越优。
-        return score
-
-    # 只在可比较 profile 的候选中做二次选择，避免无重叠候选被误判为连续。
-    indexed_candidates = [
-        (index, candidate)
-        for index, candidate in enumerate(safe_candidates)
-        if index in profile_metrics
-    ]
-    # 在所有 safe candidates 中按 adjusted cost 选最优；并用原始 cost 做稳定 tie-break。
-    selected_index, selected = min(
-        indexed_candidates,
-        key=lambda item: (adjusted_cost(item[0], item[1]), float(item[1].cost)),
-    )
-    # 找到 raw best 在 safe_candidates 中的下标，用于读取 raw best 的 profile 跳变。
-    raw_index = next(
-        (index for index, candidate in indexed_candidates if candidate is best_candidate),
-        -1,
-    )
-    # 读取 raw best 的 profile 误差；如果 raw best 没有可比 profile，则返回 None。
-    raw_metrics = profile_metrics.get(raw_index)
-    # 判断 raw best 是否已经明显跳出上一条轨迹的横向通道。
-    raw_outside_channel = (
-        raw_metrics is not None
-        and profile_jump_limit > 0.0
-        and raw_metrics[1] > profile_jump_limit
-    )
-    # 正值表示 raw best 比当前 selected 有更大的最小 clearance。
-    clearance_gain = float(best_candidate.min_clearance_m) - float(
-        selected.min_clearance_m
-    )
-    # 如果 selected 不是 raw best，但 raw best 明显更安全，则允许打破连续性选择。
-    if (
-        selected is not best_candidate
-        and raw_outside_channel
-        and clearance_gain >= unlock_clearance_gain
-        and float(best_candidate.min_clearance_m) >= float(safe_clearance_m)
-    ):
-        # 返回 higher_clearance，node 层会记录“为了安全裕度保留 raw best”。
-        return best_candidate, "higher_clearance"
-
-    # 原始 cost 是 plan_frenet_path() 算出的基础代价，不含 temporal/profile 惩罚。
-    raw_cost = float(best_candidate.cost)
-    # 如果连续性候选原始 cost 比 raw best 高太多，说明为了稳定牺牲过大。
-    cost_gap = float(selected.cost) - raw_cost
-    # 超过允许 cost gap 时，不接受连续性候选，退回 raw best。
-    if selected is not best_candidate and cost_gap > float(max_cost_gap):
-        return best_candidate, "lower_cost"
-    # 如果 adjusted cost 最后还是选了 raw best，就直接返回 raw。
-    if selected is best_candidate:
-        return selected, "raw"
-    # 取 selected 的最大 profile 跳变，用来区分“仍在同一通道”还是普通 temporal。
-    _, selected_max_error = profile_metrics[selected_index]
-    # selected 最大跳变在阈值内，标记为 same_profile，便于日志判断防蛇形生效。
-    if profile_jump_limit <= 0.0 or selected_max_error <= profile_jump_limit:
-        return selected, "same_profile"
-    # 有 profile 但 selected 也超过阈值，只能说是 adjusted cost 的 temporal 选择。
-    return selected, "temporal"
-
-
-def lateral_profile_error(
-    candidate_s: np.ndarray,
-    candidate_d: np.ndarray,
-    previous_s: np.ndarray,
-    previous_d: np.ndarray,
-    lookahead_m: float,
-) -> tuple[float, float] | None:
-    """计算候选轨迹和上一条轨迹在同一 `s` 区间内的横向 profile 差异。
-
-    Args:
-        candidate_s: 当前候选轨迹弧长序列。
-        candidate_d: 当前候选轨迹横向偏移序列。
-        previous_s: 上一条选中轨迹弧长序列。
-        previous_d: 上一条选中轨迹横向偏移序列。
-        lookahead_m: 从当前候选起点向前比较的最大弧长，单位 m。
-
-    Returns:
-        `(mean_abs_error, max_abs_error)`。如果两条轨迹没有足够重叠弧长，
-        返回 `None`，调用方应退回到侧别/终点连续性逻辑。
-    """
-    candidate_s = np.asarray(candidate_s, dtype=float)
-    candidate_d = np.asarray(candidate_d, dtype=float)
-    previous_s = np.asarray(previous_s, dtype=float)
-    previous_d = np.asarray(previous_d, dtype=float)
-    if (
-        len(candidate_s) < 2
-        or len(candidate_d) != len(candidate_s)
-        or len(previous_s) < 2
-        or len(previous_d) != len(previous_s)
-    ):
-        return None
-
-    candidate_s, candidate_d = _unique_monotonic_profile(candidate_s, candidate_d)
-    previous_s, previous_d = _unique_monotonic_profile(previous_s, previous_d)
-    if len(candidate_s) < 2 or len(previous_s) < 2:
-        return None
-
-    start_s = max(float(candidate_s[0]), float(previous_s[0]))
-    end_s = min(
-        float(candidate_s[-1]),
-        float(previous_s[-1]),
-        float(candidate_s[0]) + max(0.0, float(lookahead_m)),
-    )
-    if end_s <= start_s + 1e-6:
-        return None
-
-    sample_count = max(3, int(math.ceil((end_s - start_s) / 0.25)) + 1)
-    sample_s = np.linspace(start_s, end_s, sample_count)
-    candidate_profile = np.interp(sample_s, candidate_s, candidate_d)
-    previous_profile = np.interp(sample_s, previous_s, previous_d)
-    abs_error = np.abs(candidate_profile - previous_profile)
-    return float(np.mean(abs_error)), float(np.max(abs_error))
-
-
 def build_occupancy_grid(
     ranges: np.ndarray,
     angle_min: float,
@@ -975,6 +775,7 @@ def plan_frenet_path(
     config: FrenetPlannerConfig,
     stats: FrenetPlanStats | None = None,
     debug_candidates: list[CandidatePath] | None = None,
+    continuity_reference_xy: np.ndarray | None = None,
 ) -> CandidatePath | None:
     """枚举 Frenet 多项式候选并返回原始 cost 最低的安全轨迹。
 
@@ -989,6 +790,8 @@ def plan_frenet_path(
         config: 采样、碰撞和 cost 配置。
         stats: 可选统计对象，用于记录拒绝原因。
         debug_candidates: 可选列表；传入后会填充所有 safe candidates 供 RViz 显示。
+        continuity_reference_xy: 可选上一条已发布安全候选的剩余路径，用于在
+            主 cost 内惩罚近距离轨迹跳变。
 
     Returns:
         原始 cost 最低的 `CandidatePath`；如果没有 safe candidate，则返回 `None`。
@@ -1085,6 +888,7 @@ def plan_frenet_path(
                     duration,
                     min_clearance,
                     config,
+                    continuity_reference_xy=continuity_reference_xy,
                 )
                 # 硬过滤 5：曲率超过车辆可跟踪上限，直接丢弃。
                 if scored_candidate.max_curvature > config.max_curvature:
@@ -1108,7 +912,6 @@ def plan_frenet_path(
     # RViz 候选也按 cost 排序，方便 debug marker 前几个就是更优候选。
     if debug_candidates is not None:
         debug_candidates.sort(key=lambda candidate: candidate.cost)
-    # 返回 raw best；node 层还可能用 temporal consistency 做二次选择。
     return candidates[0]
 
 
@@ -1123,6 +926,8 @@ def score_candidate(
     duration: float,
     min_clearance: float,
     config: FrenetPlannerConfig,
+    *,
+    continuity_reference_xy: np.ndarray | None = None,
 ) -> CandidatePath:
     """计算单条候选轨迹的 soft cost。
 
@@ -1140,6 +945,8 @@ def score_candidate(
         duration: 候选轨迹时长，单位 s。
         min_clearance: 轨迹最小障碍物裕度，单位 m。
         config: cost 权重和约束配置。
+        continuity_reference_xy: 可选上一条候选的剩余路径。存在时只比较车前近距离
+            xy 形状差异，并作为 soft cost 项参与统一排序。
 
     Returns:
         带 cost、clearance 和曲率指标的 `CandidatePath`。
@@ -1155,8 +962,16 @@ def score_candidate(
     curvature_rate = curvature_smoothness_cost(xy, path_curvature)
     # 横向相邻采样点最大变化量，用来惩罚局部横向突变。
     lateral_shift = float(np.max(np.abs(np.diff(d_values)))) if len(d_values) > 1 else 0.0
+    continuity_cost = path_continuity_cost(
+        xy,
+        continuity_reference_xy,
+        config.path_continuity_lookahead_m,
+        config.path_continuity_sample_step_m,
+    )
     # safe_clearance 是期望裕度；低于它但高于 min_clearance 的候选会被 soft penalty 惩罚。
     clearance_deficit = max(0.0, config.safe_clearance - min_clearance)
+    clearance_scale = max(config.safe_clearance, 1e-6)
+    clearance_cost = (clearance_deficit / clearance_scale) ** 2
     # 终点速度越接近 target_speed，速度项 cost 越低。
     speed_error = float((config.target_speed - s_dot_values[-1]) ** 2)
 
@@ -1172,22 +987,24 @@ def score_candidate(
         + config.weight_lateral_offset * float(d_values[-1] ** 2)
         # 终点速度偏离 target_speed 会被惩罚。
         + config.weight_speed_error * speed_error
-        # clearance 低于期望安全裕度时二次惩罚；高于 safe_clearance 不再奖励。
-        + config.weight_obstacle_clearance * clearance_deficit**2
+        # clearance 低于期望安全裕度时二次惩罚；归一化后低裕度轨迹不会被中心线偏置压过。
+        + config.weight_obstacle_clearance * clearance_cost
         # 绝对曲率只给轻微偏好，避免把正常绕障弧线压回中心线。
         + config.weight_curvature * max_curvature**2
         # 曲率变化率是主要平滑项，抑制局部弯弯绕绕的候选。
         + config.weight_curvature_rate * curvature_rate
         # 横向采样跳变越大，路径越可能不好跟踪，惩罚越大。
         + config.weight_lateral_shift * lateral_shift
+        # 当前路径越接近上一条已发布路径的近距离形状，LQR 参考线越不容易左右跳。
+        + config.weight_path_continuity * continuity_cost
     )
     # 打包为 CandidatePath，后续 node 层和 RViz 都使用这个结构。
     return CandidatePath(
         # 世界坐标轨迹点，最终发布给 LQR 前还会按车辆当前位置重锚定。
         xy=xy,
-        # 候选的纵向 Frenet 弧长序列，用于 profile 连续性比较。
+        # 候选的纵向 Frenet 弧长序列，用于调试和后续分析。
         s=s_values,
-        # 候选的横向 Frenet 偏移序列，用于 profile 连续性比较。
+        # 候选的横向 Frenet 偏移序列，用于调试和后续分析。
         d=d_values,
         # 纵向速度序列，用于调试和后续分析。
         s_dot=s_dot_values,
@@ -1200,6 +1017,48 @@ def score_candidate(
         # 该候选沿整条路径的最大曲率。
         max_curvature=max_curvature,
     )
+
+
+def path_continuity_cost(
+    candidate_xy: np.ndarray,
+    reference_xy: np.ndarray | None,
+    lookahead_m: float,
+    sample_step_m: float,
+) -> float:
+    """计算候选路径与上一条路径近距离形状差异。
+
+    Args:
+        candidate_xy: 当前候选世界坐标路径点。
+        reference_xy: 上一条已发布候选重锚定后的剩余路径；为空时返回 0。
+        lookahead_m: 从路径起点向前比较的最大长度，单位 m。
+        sample_step_m: 沿弧长重采样间隔，单位 m。
+
+    Returns:
+        两条路径在重叠近距离区间内的平均平方距离，单位 m^2。
+    """
+    if reference_xy is None:
+        return 0.0
+    candidate = np.asarray(candidate_xy, dtype=float).reshape(-1, 2)
+    reference = np.asarray(reference_xy, dtype=float).reshape(-1, 2)
+    if len(candidate) < 2 or len(reference) < 2:
+        return 0.0
+    candidate_s = _cumulative_arc_length(candidate)
+    reference_s = _cumulative_arc_length(reference)
+    max_s = min(
+        max(0.0, float(lookahead_m)),
+        float(candidate_s[-1]),
+        float(reference_s[-1]),
+    )
+    if max_s <= 1e-6:
+        return 0.0
+    step = max(1e-3, float(sample_step_m))
+    sample_s = np.arange(0.0, max_s + 0.5 * step, step, dtype=float)
+    if sample_s[-1] > max_s:
+        sample_s[-1] = max_s
+    candidate_samples = _sample_polyline_at_s(candidate, candidate_s, sample_s)
+    reference_samples = _sample_polyline_at_s(reference, reference_s, sample_s)
+    delta = candidate_samples - reference_samples
+    return float(np.mean(np.einsum("ij,ij->i", delta, delta)))
 
 
 def curvature_smoothness_cost(points: np.ndarray, path_curvature: np.ndarray) -> float:
@@ -1842,33 +1701,6 @@ def _compress_path_samples(points: np.ndarray, min_spacing_m: float) -> np.ndarr
     return np.asarray(filtered, dtype=float)
 
 
-def _unique_monotonic_profile(
-    s_values: np.ndarray,
-    d_values: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """压缩 `s/d` profile，保证 `np.interp()` 需要的单调唯一弧长。
-
-    Args:
-        s_values: 原始弧长序列。
-        d_values: 原始横向偏移序列。
-
-    Returns:
-        `(unique_s, unique_d)`。重复或倒退的弧长点会被跳过，保留第一次出现的点。
-    """
-    s_array = np.asarray(s_values, dtype=float)
-    d_array = np.asarray(d_values, dtype=float)
-    keep_s: list[float] = []
-    keep_d: list[float] = []
-    last_s = -float("inf")
-    for s_value, d_value in zip(s_array, d_array):
-        if not (math.isfinite(float(s_value)) and math.isfinite(float(d_value))):
-            continue
-        if float(s_value) <= last_s + 1e-9:
-            continue
-        keep_s.append(float(s_value))
-        keep_d.append(float(d_value))
-        last_s = float(s_value)
-    return np.asarray(keep_s, dtype=float), np.asarray(keep_d, dtype=float)
 
 
 def _cumulative_arc_length(points: np.ndarray) -> np.ndarray:
@@ -1884,6 +1716,30 @@ def _cumulative_arc_length(points: np.ndarray) -> np.ndarray:
         return np.zeros(len(points), dtype=float)
     segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
     return np.concatenate([[0.0], np.cumsum(segment_lengths)])
+
+
+def _sample_polyline_at_s(
+    points: np.ndarray,
+    cumulative_s: np.ndarray,
+    sample_s: np.ndarray,
+) -> np.ndarray:
+    """按累计弧长重采样开放折线路径。
+
+    Args:
+        points: 路径点数组，形状为 `(N, 2)`。
+        cumulative_s: 每个路径点的累计弧长。
+        sample_s: 要查询的弧长位置数组。
+
+    Returns:
+        与 `sample_s` 等长的二维采样点数组。
+    """
+    sample_s = np.clip(np.asarray(sample_s, dtype=float), 0.0, float(cumulative_s[-1]))
+    return np.column_stack(
+        [
+            np.interp(sample_s, cumulative_s, points[:, 0]),
+            np.interp(sample_s, cumulative_s, points[:, 1]),
+        ]
+    )
 
 
 def _local_points_to_indices(

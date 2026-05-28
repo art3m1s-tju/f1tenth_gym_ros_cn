@@ -26,12 +26,10 @@ from pnc_rc.frenet.planner import (
     build_occupancy_grid,
     initial_frenet_state,
     local_static_map_occupancy,
-    path_pose_error,
     plan_frenet_path,
     polyline_length,
     sample_reference_segment,
     sample_return_to_centerline_segment,
-    select_temporally_consistent_candidate,
     speed_based_activation_lookahead,
     trim_path_to_position,
 )
@@ -103,6 +101,15 @@ class FrenetStaticObstaclePlanner(Node):
             weight_curvature=float(self.get_parameter("weight_curvature").value),
             weight_curvature_rate=float(
                 self.get_parameter("weight_curvature_rate").value
+            ),
+            weight_path_continuity=float(
+                self.get_parameter("weight_path_continuity").value
+            ),
+            path_continuity_lookahead_m=float(
+                self.get_parameter("path_continuity_lookahead_m").value
+            ),
+            path_continuity_sample_step_m=float(
+                self.get_parameter("path_continuity_sample_step_m").value
             ),
             safe_clearance=float(self.get_parameter("safe_clearance_m").value),
             min_clearance_m=float(self.get_parameter("min_clearance_m").value),
@@ -194,46 +201,6 @@ class FrenetStaticObstaclePlanner(Node):
         self.reuse_last_candidate_timeout_s = max(
             0.0,
             float(self.get_parameter("reuse_last_candidate_timeout_s").value),
-        )
-        self.held_path_replan_clearance_m = max(
-            self.planner_config.min_clearance_m,
-            float(self.get_parameter("held_path_replan_clearance_m").value),
-        )
-        self.held_path_min_remaining_m = max(
-            0.0,
-            float(self.get_parameter("held_path_min_remaining_m").value),
-        )
-        self.held_path_max_lateral_error_m = max(
-            0.0,
-            float(self.get_parameter("held_path_max_lateral_error_m").value),
-        )
-        self.held_path_max_heading_error_rad = max(
-            0.0,
-            float(self.get_parameter("held_path_max_heading_error_rad").value),
-        )
-        self.candidate_profile_consistency_weight = max(
-            0.0,
-            float(self.get_parameter("candidate_profile_consistency_weight").value),
-        )
-        self.candidate_profile_max_jump_m = max(
-            0.0,
-            float(self.get_parameter("candidate_profile_max_jump_m").value),
-        )
-        self.candidate_profile_lookahead_m = max(
-            0.0,
-            float(self.get_parameter("candidate_profile_lookahead_m").value),
-        )
-        self.candidate_profile_unlock_clearance_gain_m = max(
-            0.0,
-            float(
-                self.get_parameter(
-                    "candidate_profile_unlock_clearance_gain_m"
-                ).value
-            ),
-        )
-        self.candidate_channel_memory_timeout_s = max(
-            0.0,
-            float(self.get_parameter("candidate_channel_memory_timeout_s").value),
         )
         self.projection_search_window_m = max(
             0.5,
@@ -343,13 +310,8 @@ class FrenetStaticObstaclePlanner(Node):
         self.last_path_drop_log_time = 0.0
         self.last_mode_log_time = 0.0
         self.last_far_threat_log_time = 0.0
-        self.last_hold_replan_log_time = 0.0
-        self.last_candidate_selection_log_time = 0.0
         self.last_velocity_filter_log_time = 0.0
         self.current_mode = "centerline"
-        self.last_selected_candidate_s_profile: np.ndarray | None = None
-        self.last_selected_candidate_d_profile: np.ndarray | None = None
-        self.last_selected_candidate_time: float | None = None
         self.last_published_path_xy: np.ndarray | None = None
         self.last_published_path_time: float | None = None
         self.last_published_path_mode: str | None = None
@@ -445,10 +407,10 @@ class FrenetStaticObstaclePlanner(Node):
         流程:
             1. 从里程计和全局参考线估计当前 Frenet 状态。
             2. 用 LaserScan 与静态地图生成局部占据栅格。
-            3. 若上一条 Frenet 路径仍安全且未接近终点，继续执行它。
-            4. 沿中心线检测前方威胁距离。
-            5. 无威胁时发布中心线；进入预激活区间时只提前限速；
+            3. 沿中心线检测前方威胁距离。
+            4. 无威胁时发布中心线；进入预激活区间时只提前限速；
                进入激活区间后才生成 Frenet 候选或 stop path。
+            5. 当前周期无安全候选时，才短时复用上一条仍安全的候选。
 
         Returns:
             None。该函数通过 ROS topic 发布局部轨迹、速度限制和 RViz marker。
@@ -508,7 +470,7 @@ class FrenetStaticObstaclePlanner(Node):
         )
         if centerline_threat_distance is None:
             self.current_mode = "centerline"
-            self._clear_candidate_memory(clear_channel=False, now=now)
+            self._clear_candidate_memory()
             self._publish_centerline_path(stamp, position, yaw, state.s, state.d)
             self._log_mode(
                 now,
@@ -518,7 +480,7 @@ class FrenetStaticObstaclePlanner(Node):
 
         if centerline_threat_distance > slowdown_lookahead:
             self.current_mode = "centerline"
-            self._clear_candidate_memory(clear_channel=False, now=now)
+            self._clear_candidate_memory()
             self._publish_centerline_path(
                 stamp,
                 position,
@@ -539,7 +501,7 @@ class FrenetStaticObstaclePlanner(Node):
         preactivation_only = centerline_threat_distance > activation_lookahead
         if preactivation_only:
             self.current_mode = "approach"
-            self._clear_candidate_memory(clear_channel=False, now=now)
+            self._clear_candidate_memory()
             self._publish_centerline_path(
                 stamp,
                 position,
@@ -557,13 +519,10 @@ class FrenetStaticObstaclePlanner(Node):
             )
             return
 
-        if self._publish_held_path_if_safe(stamp, now, occupancy, vehicle_pose):
-            self.publish_debug_markers(stamp, [], None, keep_previous=True)
-            return
-
         self.current_mode = "frenet"
         stats = FrenetPlanStats()
         debug_candidates = []
+        continuity_reference_xy = self._continuity_reference_path(position)
         candidate = plan_frenet_path(
             self.reference,
             state,
@@ -572,6 +531,7 @@ class FrenetStaticObstaclePlanner(Node):
             self.planner_config,
             stats,
             debug_candidates=debug_candidates,
+            continuity_reference_xy=continuity_reference_xy,
         )
         publish_position, publish_yaw = self._odom_pose(self.latest_odom)
         fresh_s, fresh_d, _, _ = self.reference.project_near(
@@ -606,7 +566,6 @@ class FrenetStaticObstaclePlanner(Node):
             return
         self.last_plan_elapsed_sec = time.perf_counter() - plan_start
         self._log_plan_timing(now, stats, self.last_plan_elapsed_sec)
-        candidate = self._select_consistent_candidate(candidate, debug_candidates, now)
         anchored_candidate = trim_path_to_position(
             candidate.xy,
             publish_position,
@@ -634,42 +593,40 @@ class FrenetStaticObstaclePlanner(Node):
             return
         self.last_safe_candidate_xy = np.asarray(candidate.xy, dtype=float).copy()
         self.last_safe_candidate_time = now
-        self.last_selected_candidate_s_profile = np.asarray(candidate.s, dtype=float).copy()
-        self.last_selected_candidate_d_profile = np.asarray(candidate.d, dtype=float).copy()
-        self.last_selected_candidate_time = now
         self.publish_debug_markers(stamp, debug_candidates, candidate)
         self.publish_path(stamp, anchored_candidate, mode="avoidance", force=True)
 
-    def _clear_candidate_memory(
-        self,
-        *,
-        clear_channel: bool = True,
-        now: float | None = None,
-    ) -> None:
+    def _clear_candidate_memory(self) -> None:
         """清空与上一条 Frenet 候选相关的状态记忆。
-
-        Args:
-            clear_channel: 是否同时清空用于防蛇形的横向通道记忆。中心线短暂安全
-                时只应清掉 path cache，不应立刻忘记刚选过的避障通道。
-            now: `time.monotonic()` 当前时间。`clear_channel=False` 时用于判断
-                通道记忆是否超过 timeout。
 
         Returns:
             None。
         """
         self.last_safe_candidate_xy = None
         self.last_safe_candidate_time = None
-        if (
-            not clear_channel
-            and now is not None
-            and self.last_selected_candidate_time is not None
-            and now - self.last_selected_candidate_time
-            <= self.candidate_channel_memory_timeout_s
-        ):
-            return
-        self.last_selected_candidate_s_profile = None
-        self.last_selected_candidate_d_profile = None
-        self.last_selected_candidate_time = None
+
+    def _continuity_reference_path(self, position: np.ndarray) -> np.ndarray | None:
+        """构造用于主 cost 的上一条安全轨迹近距离参考。
+
+        Args:
+            position: 当前车辆世界坐标。
+
+        Returns:
+            重锚定到车辆当前位置附近的上一条 safe candidate；没有可用缓存时返回
+            `None`。
+        """
+        if self.last_safe_candidate_xy is None:
+            return None
+        trimmed = trim_path_to_position(
+            self.last_safe_candidate_xy,
+            position,
+            min_remaining_length_m=0.0,
+            anchor_lookahead_m=0.0,
+            max_remaining_length_m=self.planner_config.path_continuity_lookahead_m,
+        )
+        if len(trimmed) < 2:
+            return None
+        return trimmed
 
     def _publish_approach_or_stop(
         self,
@@ -896,83 +853,6 @@ class FrenetStaticObstaclePlanner(Node):
         self.publish_debug_markers(stamp, [], None)
         self.publish_path(stamp, anchored, mode=mode)
 
-    def _publish_held_path_if_safe(
-        self,
-        stamp,
-        now: float,
-        occupancy,
-        vehicle_pose: tuple[float, float, float],
-    ) -> bool:
-        """在上一条 Frenet 轨迹仍安全时继续复用。
-
-        Args:
-            stamp: ROS 时间戳。
-            now: `time.monotonic()` 当前时间。
-            occupancy: 当前局部占据栅格。
-            vehicle_pose: 车辆世界位姿 `(x, y, yaw)`。
-
-        Returns:
-            如果成功复用并已发布轨迹，返回 `True`；否则返回 `False`，调用方
-            需要重新规划。
-        """
-        cached = self._safe_cached_candidate(now, occupancy, vehicle_pose)
-        if cached is None:
-            return False
-        candidate_xy, age, min_clearance = cached
-        pose_error_m, heading_error_rad = path_pose_error(
-            candidate_xy,
-            np.array([vehicle_pose[0], vehicle_pose[1]], dtype=float),
-            vehicle_pose[2],
-        )
-        if pose_error_m > self.held_path_max_lateral_error_m:
-            self._log_hold_replan(
-                now,
-                "held path lateral error "
-                f"{pose_error_m:.2f}m exceeds "
-                f"{self.held_path_max_lateral_error_m:.2f}m",
-            )
-            return False
-        if heading_error_rad > self.held_path_max_heading_error_rad:
-            self._log_hold_replan(
-                now,
-                "held path heading error "
-                f"{heading_error_rad:.2f}rad exceeds "
-                f"{self.held_path_max_heading_error_rad:.2f}rad",
-            )
-            return False
-        if min_clearance < self.held_path_replan_clearance_m:
-            self._log_hold_replan(
-                now,
-                "held path clearance "
-                f"{min_clearance:.2f}m below replan threshold "
-                f"{self.held_path_replan_clearance_m:.2f}m",
-            )
-            return False
-
-        anchored, _ = self._trim_cached_candidate(candidate_xy, vehicle_pose)
-        if len(anchored) < 2:
-            return False
-        remaining_length = polyline_length(anchored)
-        if remaining_length < self.held_path_min_remaining_m:
-            self._log_hold_replan(
-                now,
-                "held path remaining length "
-                f"{remaining_length:.2f}m below {self.held_path_min_remaining_m:.2f}m",
-            )
-            return False
-
-        self.current_mode = "hold"
-        self._log_mode(
-            now,
-            "Holding safe Frenet path "
-            f"(age={age:.2f}s, clearance={min_clearance:.2f}m, "
-            f"remaining={remaining_length:.2f}m, "
-            f"pose_error={pose_error_m:.2f}m, "
-            f"heading_error={heading_error_rad:.2f}rad).",
-        )
-        self.publish_path(stamp, anchored, mode="avoidance")
-        return True
-
     def _safe_cached_candidate(
         self,
         now: float,
@@ -1047,113 +927,6 @@ class FrenetStaticObstaclePlanner(Node):
             self.max_published_path_length_m,
         )
         return anchored, publish_yaw
-
-    def _select_consistent_candidate(
-        self,
-        best_candidate,
-        safe_candidates,
-        now: float,
-    ):
-        """在原始最佳候选和近距离 profile 连续性之间做最终选择。
-
-        Args:
-            best_candidate: `plan_frenet_path()` 返回的原始最低 cost 候选。
-            safe_candidates: 当前周期所有通过硬约束的候选，用于 RViz 和二次筛选。
-            now: `time.monotonic()` 当前时间，用于日志限频。
-
-        Returns:
-            最终发布的候选轨迹。选择只在 hard-safe 候选内比较近距离
-            `d(s)` profile，不再使用远端终点 `d` 伪造连续性。
-        """
-        # 下面这些情况无法或不需要做二次选择，直接使用 plan_frenet_path 的 raw best。
-        if (
-            # 没有 raw best，调用方后续会进入 stop/reuse 逻辑。
-            best_candidate is None
-            # 没有 safe candidate 集合，就没有可替换对象。
-            or not safe_candidates
-            # 没有上一条 profile，说明这是首次选择或记忆已清空。
-            or self.last_selected_candidate_s_profile is None
-            or self.last_selected_candidate_d_profile is None
-            # profile 连续性被关闭时，不做额外选择。
-            or self.candidate_profile_consistency_weight <= 0.0
-            or self.candidate_profile_lookahead_m <= 0.0
-        ):
-            return best_candidate
-
-        # 在所有 hard-safe candidates 里做二次选择，降低轨迹帧间跳变。
-        selected, selection_reason = select_temporally_consistent_candidate(
-            # plan_frenet_path 按原始 cost 选出的最低代价候选。
-            best_candidate,
-            # 当前周期所有通过硬约束的候选，来自 debug_candidates。
-            safe_candidates,
-            # 上一条最终发布候选的 s profile，用于和当前候选对齐比较。
-            previous_s_profile=self.last_selected_candidate_s_profile,
-            # 上一条最终发布候选的 d profile，用于判断整条横向通道是否连续。
-            previous_d_profile=self.last_selected_candidate_d_profile,
-            # 整条 d(s) profile 平均误差惩罚权重。
-            profile_consistency_weight=self.candidate_profile_consistency_weight,
-            # profile 最大跳变阈值，超过它认为跳出旧通道。
-            profile_max_jump_m=self.candidate_profile_max_jump_m,
-            # 只比较未来这段距离内的 d(s)，避免远端尾巴影响当前选择。
-            profile_lookahead_m=self.candidate_profile_lookahead_m,
-            # raw best 至少多出这么多 clearance，才允许打破 profile 连续性。
-            profile_unlock_clearance_gain_m=(
-                self.candidate_profile_unlock_clearance_gain_m
-            ),
-            # 期望安全裕度；raw best 达到该裕度才允许用 higher_clearance 解锁。
-            safe_clearance_m=self.planner_config.safe_clearance,
-        )
-        # raw_cost 是不含 temporal/profile 惩罚的原始代价。
-        raw_cost = float(best_candidate.cost)
-        # selected_cost 同样是原始代价，用于日志解释为了连续性牺牲了多少基础 cost。
-        selected_cost = float(selected.cost)
-        # lower_cost 表示连续性候选原始 cost 太高，所以最终保留 raw best。
-        if selection_reason == "lower_cost":
-            # 候选选择日志限频，避免 20Hz 规划时刷屏。
-            if now - self.last_candidate_selection_log_time >= 0.5:
-                # 更新日志时间戳。
-                self.last_candidate_selection_log_time = now
-                # 打印 raw/selected cost，方便判断 temporal 惩罚是否过强。
-                self.get_logger().info(
-                    "Keeping lower-cost Frenet candidate instead of "
-                    "temporally consistent candidate "
-                    f"(raw_cost={raw_cost:.2f}, selected_cost={selected_cost:.2f}, "
-                    f"cost_gap={selected_cost - raw_cost:.2f})."
-                )
-            # 明确返回 raw best，而不是 selected。
-            return best_candidate
-        # higher_clearance 表示 raw best 的安全裕度明显更好，所以打破连续性锁定。
-        if selection_reason == "higher_clearance":
-            # 同样做日志限频。
-            if now - self.last_candidate_selection_log_time >= 0.5:
-                # 更新日志时间戳。
-                self.last_candidate_selection_log_time = now
-                # 打印 raw clearance 和期望 safe_clearance，说明为什么保留 raw best。
-                self.get_logger().info(
-                    "Keeping higher-clearance Frenet candidate instead of "
-                    "channel-consistent candidate "
-                    f"(raw_clearance={float(best_candidate.min_clearance_m):.2f}m, "
-                    f"safe_clearance={float(self.planner_config.safe_clearance):.2f}m)."
-                )
-            # 明确返回 raw best，而不是 selected。
-            return best_candidate
-        # 如果二次选择真的替换了 raw best，就打印一次解释日志。
-        if selected is not best_candidate and now - self.last_candidate_selection_log_time >= 0.5:
-            # 更新日志时间戳。
-            self.last_candidate_selection_log_time = now
-            # 打印 raw/selected 的 d、cost、clearance，方便 RViz 现象和代码选择对应起来。
-            self.get_logger().info(
-                "Selecting channel-consistent Frenet candidate "
-                f"(raw_d={float(best_candidate.d[-1]):.2f}, "
-                f"selected_d={float(selected.d[-1]):.2f}, "
-                f"reason={selection_reason}, "
-                f"raw_cost={raw_cost:.2f}, "
-                f"selected_cost={selected_cost:.2f}, "
-                f"raw_clearance={float(best_candidate.min_clearance_m):.2f}m, "
-                f"selected_clearance={float(selected.min_clearance_m):.2f}m)."
-            )
-        # 返回最终发布的候选；可能是 raw best，也可能是 temporal/profile 更连续的候选。
-        return selected
 
     def log_no_candidate(
         self,
@@ -1424,8 +1197,7 @@ class FrenetStaticObstaclePlanner(Node):
     ) -> bool:
         """当前周期无解时短时复用上一条安全候选。
 
-        与 `_publish_held_path_if_safe()` 的区别是：held path 是正常规划前的
-        主动保持；reuse 是当前周期已经规划失败后的兜底。复用前仍会重新做
+        reuse 只在当前周期已经规划失败后兜底。复用前仍会重新做
         collision/clearance 检查，避免盲目沿用过期轨迹。
 
         Args:
@@ -1497,7 +1269,7 @@ class FrenetStaticObstaclePlanner(Node):
             stamp: ROS 时间戳。
             points: 候选轨迹世界坐标点。
             marker_id: marker ID。
-            is_best: 是否为最终选择的最低代价/同侧稳定候选。
+            is_best: 是否为最终选择的最低代价候选。
 
         Returns:
             可发布到 MarkerArray 的 line strip marker。
@@ -1700,22 +1472,6 @@ class FrenetStaticObstaclePlanner(Node):
             f"slowdown_lookahead={slowdown_lookahead_m:.2f}m, "
             f"cruise_speed={self.cruise_speed_mps:.2f}m/s)."
         )
-
-    def _log_hold_replan(self, now: float, reason: str) -> None:
-        """限频打印不再 hold 上一条轨迹而选择重规划的原因。
-
-        Args:
-            now: `time.monotonic()` 当前时间。
-            reason: 触发重规划的原因说明。
-
-        Returns:
-            None。
-        """
-        if now - self.last_hold_replan_log_time < 0.5:
-            return
-        self.last_hold_replan_log_time = now
-        self.get_logger().info(f"Replanning instead of holding Frenet path ({reason}).")
-
 
 def main(args=None) -> None:
     """ROS 2 节点入口。

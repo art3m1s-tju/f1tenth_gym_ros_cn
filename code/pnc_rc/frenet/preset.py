@@ -29,6 +29,9 @@ FRENET_NODE_DEFAULTS = {
     "max_curvature": 1.14,
     "weight_curvature": 0.4,
     "weight_curvature_rate": 8.0,
+    "weight_path_continuity": 2.0,
+    "path_continuity_lookahead_m": 3.0,
+    "path_continuity_sample_step_m": 0.25,
     "safe_clearance_m": 0.35,
     "min_clearance_m": 0.05,
     "corridor_radius_m": 0.20,
@@ -49,15 +52,6 @@ FRENET_NODE_DEFAULTS = {
     "debug_marker_topic": "/frenet/debug/candidates",
     "debug_max_safe_candidates": 12,
     "reuse_last_candidate_timeout_s": 1.0,
-    "held_path_replan_clearance_m": 0.22,
-    "held_path_min_remaining_m": 2.0,
-    "held_path_max_lateral_error_m": 0.45,
-    "held_path_max_heading_error_rad": 0.85,
-    "candidate_profile_consistency_weight": 20.0,
-    "candidate_profile_max_jump_m": 0.35,
-    "candidate_profile_lookahead_m": 4.0,
-    "candidate_profile_unlock_clearance_gain_m": 0.12,
-    "candidate_channel_memory_timeout_s": 1.5,
     "projection_search_window_m": 6.0,
     "stop_path_length_m": 2.0,
     "min_published_path_length_m": 0.75,
@@ -109,6 +103,9 @@ FRENET_LAUNCH_ARGUMENT_DEFAULTS = [
     ("frenet_max_curvature", "1.14"),
     ("frenet_weight_curvature", "0.4"),
     ("frenet_weight_curvature_rate", "8.0"),
+    ("frenet_weight_path_continuity", "2.0"),
+    ("frenet_path_continuity_lookahead_m", "3.0"),
+    ("frenet_path_continuity_sample_step_m", "0.25"),
     ("frenet_safe_clearance_m", "0.35"),
     ("frenet_min_clearance_m", "0.05"),
     ("frenet_corridor_radius_m", "0.20"),
@@ -121,15 +118,6 @@ FRENET_LAUNCH_ARGUMENT_DEFAULTS = [
     ("frenet_max_initial_s_accel_mps2", "2.0"),
     ("frenet_max_reliable_initial_s_accel_mps2", "3.0"),
     ("frenet_reuse_last_candidate_timeout_s", "1.0"),
-    ("frenet_held_path_replan_clearance_m", "0.22"),
-    ("frenet_held_path_min_remaining_m", "2.0"),
-    ("frenet_held_path_max_lateral_error_m", "0.45"),
-    ("frenet_held_path_max_heading_error_rad", "0.85"),
-    ("frenet_candidate_profile_consistency_weight", "20.0"),
-    ("frenet_candidate_profile_max_jump_m", "0.35"),
-    ("frenet_candidate_profile_lookahead_m", "4.0"),
-    ("frenet_candidate_profile_unlock_clearance_gain_m", "0.12"),
-    ("frenet_candidate_channel_memory_timeout_s", "1.5"),
     ("frenet_projection_search_window_m", "6.0"),
     ("frenet_stop_path_length_m", "2.0"),
     ("frenet_min_published_path_length_m", "0.75"),
@@ -180,6 +168,9 @@ FRENET_NODE_PARAM_MAP = [
     ("max_curvature", "frenet_max_curvature"),
     ("weight_curvature", "frenet_weight_curvature"),
     ("weight_curvature_rate", "frenet_weight_curvature_rate"),
+    ("weight_path_continuity", "frenet_weight_path_continuity"),
+    ("path_continuity_lookahead_m", "frenet_path_continuity_lookahead_m"),
+    ("path_continuity_sample_step_m", "frenet_path_continuity_sample_step_m"),
     ("safe_clearance_m", "frenet_safe_clearance_m"),
     ("min_clearance_m", "frenet_min_clearance_m"),
     ("corridor_radius_m", "frenet_corridor_radius_m"),
@@ -195,27 +186,6 @@ FRENET_NODE_PARAM_MAP = [
         "frenet_max_reliable_initial_s_accel_mps2",
     ),
     ("reuse_last_candidate_timeout_s", "frenet_reuse_last_candidate_timeout_s"),
-    ("held_path_replan_clearance_m", "frenet_held_path_replan_clearance_m"),
-    ("held_path_min_remaining_m", "frenet_held_path_min_remaining_m"),
-    ("held_path_max_lateral_error_m", "frenet_held_path_max_lateral_error_m"),
-    (
-        "held_path_max_heading_error_rad",
-        "frenet_held_path_max_heading_error_rad",
-    ),
-    (
-        "candidate_profile_consistency_weight",
-        "frenet_candidate_profile_consistency_weight",
-    ),
-    ("candidate_profile_max_jump_m", "frenet_candidate_profile_max_jump_m"),
-    ("candidate_profile_lookahead_m", "frenet_candidate_profile_lookahead_m"),
-    (
-        "candidate_profile_unlock_clearance_gain_m",
-        "frenet_candidate_profile_unlock_clearance_gain_m",
-    ),
-    (
-        "candidate_channel_memory_timeout_s",
-        "frenet_candidate_channel_memory_timeout_s",
-    ),
     ("projection_search_window_m", "frenet_projection_search_window_m"),
     ("stop_path_length_m", "frenet_stop_path_length_m"),
     ("min_published_path_length_m", "frenet_min_published_path_length_m"),
@@ -272,8 +242,6 @@ class FrenetPreset:
         d_step: 横向终点采样间隔，单位 m。
         trajectory_dt: 候选轨迹离散时间步长，单位 s。
         grid_forward_m: 局部占据栅格前向距离，单位 m。
-        hold_replan_clearance_m: hold 轨迹低于该 clearance 时强制重规划，单位 m。
-        hold_min_remaining_m: hold 轨迹剩余长度低于该值时强制重规划，单位 m。
         reuse_timeout_s: 当前周期无解时允许复用上一条安全轨迹的最长时间，单位 s。
         activation_max_m: Frenet 激活距离上限，单位 m。
         activation_reaction_s: 速度相关激活距离中的反应时间项，单位 s。
@@ -290,8 +258,6 @@ class FrenetPreset:
     d_step: float
     trajectory_dt: float
     grid_forward_m: float
-    hold_replan_clearance_m: float
-    hold_min_remaining_m: float
     reuse_timeout_s: float
     activation_max_m: float
     activation_reaction_s: float
@@ -309,8 +275,8 @@ def compute_frenet_preset(target_speed: float, avoidance_speed: float) -> Frenet
         avoidance_speed: Frenet 避障阶段局部限速，单位 m/s。
 
     Returns:
-        `FrenetPreset`。高速时扩大栅格、预激活距离和候选轨迹保持时间；低速
-        时使用更短保持和更密轨迹采样，减少过度保守。
+        `FrenetPreset`。高速时扩大栅格、预激活距离和发布轨迹长度；低速
+        时使用更密轨迹采样，减少过度保守。
     """
     target = float(target_speed)
     avoidance = float(avoidance_speed)
@@ -325,8 +291,6 @@ def compute_frenet_preset(target_speed: float, avoidance_speed: float) -> Frenet
         d_step=0.35 if target >= 2.0 else 0.3,
         trajectory_dt=0.10 if target >= 2.0 else 0.05,
         grid_forward_m=max(10.0, target * 6.0 + 2.0),
-        hold_replan_clearance_m=0.10 if target >= 2.0 else 0.20,
-        hold_min_remaining_m=max(1.20, min(2.20, target * 0.70)),
         reuse_timeout_s=2.0 if target >= 2.0 else 1.0,
         activation_max_m=max(8.0, 2.5 + target * 2.7),
         activation_reaction_s=1.2 if target >= 2.0 else 1.0,
@@ -378,6 +342,9 @@ def frenet_static_test_launch_args(
         "frenet_max_curvature:=1.14",
         "frenet_weight_curvature:=0.4",
         "frenet_weight_curvature_rate:=8.0",
+        "frenet_weight_path_continuity:=2.0",
+        "frenet_path_continuity_lookahead_m:=3.0",
+        "frenet_path_continuity_sample_step_m:=0.25",
         "frenet_corridor_radius_m:=0.16",
         "frenet_corridor_sample_step_m:=0.05",
         "frenet_path_collision_sample_step_m:=0.05",
@@ -404,15 +371,6 @@ def frenet_static_test_launch_args(
         f"frenet_activation_path_margin_m:={preset.activation_path_margin_m:.3f}",
         f"frenet_approach_slowdown_extra_m:={preset.approach_extra_m:.3f}",
         f"frenet_reuse_last_candidate_timeout_s:={preset.reuse_timeout_s:.3f}",
-        f"frenet_held_path_replan_clearance_m:={preset.hold_replan_clearance_m:.3f}",
-        f"frenet_held_path_min_remaining_m:={preset.hold_min_remaining_m:.3f}",
-        "frenet_held_path_max_lateral_error_m:=0.45",
-        "frenet_held_path_max_heading_error_rad:=0.85",
-        "frenet_candidate_profile_consistency_weight:=20.0",
-        "frenet_candidate_profile_max_jump_m:=0.35",
-        "frenet_candidate_profile_lookahead_m:=4.0",
-        "frenet_candidate_profile_unlock_clearance_gain_m:=0.12",
-        "frenet_candidate_channel_memory_timeout_s:=1.5",
         "frenet_centerline_return_direct_d_threshold_m:=0.20",
     ]
 
@@ -448,8 +406,6 @@ def shell_default_assignments(preset: FrenetPreset) -> str:
         "FRENET_V_STEP_DEFAULT": preset.v_step,
         "FRENET_D_STEP_DEFAULT": preset.d_step,
         "FRENET_TRAJECTORY_DT_DEFAULT": preset.trajectory_dt,
-        "FRENET_HOLD_REPLAN_CLEARANCE_DEFAULT": preset.hold_replan_clearance_m,
-        "FRENET_HOLD_MIN_REMAINING_DEFAULT": preset.hold_min_remaining_m,
         "FRENET_REUSE_TIMEOUT_DEFAULT": preset.reuse_timeout_s,
         "FRENET_ACTIVATION_MAX_DEFAULT": preset.activation_max_m,
         "FRENET_ACTIVATION_REACTION_DEFAULT": preset.activation_reaction_s,
@@ -483,8 +439,6 @@ def _preset_with_cli_overrides(preset: FrenetPreset, args: argparse.Namespace) -
         "d_step": args.d_step,
         "trajectory_dt": args.trajectory_dt,
         "grid_forward_m": args.grid_forward,
-        "hold_replan_clearance_m": args.hold_replan_clearance,
-        "hold_min_remaining_m": args.hold_min_remaining,
         "reuse_timeout_s": args.reuse_timeout,
         "activation_max_m": args.activation_max,
         "activation_reaction_s": args.activation_reaction,
@@ -515,8 +469,6 @@ def main() -> int:
     parser.add_argument("--d-step", type=float)
     parser.add_argument("--trajectory-dt", type=float)
     parser.add_argument("--grid-forward", type=float)
-    parser.add_argument("--hold-replan-clearance", type=float)
-    parser.add_argument("--hold-min-remaining", type=float)
     parser.add_argument("--reuse-timeout", type=float)
     parser.add_argument("--activation-max", type=float)
     parser.add_argument("--activation-reaction", type=float)

@@ -56,11 +56,11 @@ P22 的基础目标函数：
 6. 无威胁时发布中心线或回中路径。
 7. 有远处威胁时进入 approach，发布中心线但同步低速限速。
 8. 威胁进入激活距离后才真正生成 Frenet 候选。
-9. 若上一条避障轨迹仍安全，优先复用。
-10. 若需要重规划，三层采样 `(d_f, T, v_f)`，生成候选。
+9. 三层采样 `(d_f, T, v_f)`，生成 Frenet 候选。
+10. 当前周期无安全候选时，才短时复用上一条仍安全的避障轨迹。
 11. 对候选做硬过滤：前进性、航向跳变、车身扫掠碰撞、最小 clearance、曲率。
 12. 对安全候选计算扩展 cost。
-13. 在原始最低 cost 和上一帧通道连续性之间做二次选择。
+13. 直接选择最低 cost 候选，不再做 hold 或 temporal/profile 二次选择。
 14. 将选中路径裁剪/锚定到当前车辆附近，限制发布长度。
 15. 发布 `/local_trajectory`，同时发布 `/local_trajectory_speed_limit`。
 16. LQR 控制器跟踪局部路径，结合曲率限速、局部限速、速度斜坡和转向速率限制发 `/drive`。
@@ -203,19 +203,19 @@ P22 的基础目标函数：
 
 当前 cost 只在已经通过硬安全约束的候选之间排序，不负责碰撞兜底。
 
-### 8. 候选选择增加了时间连续性
+### 8. 候选选择收敛为单一 cost 排序
 
 基础版通常直接取最低 cost。
 
-当前流程是：
+当前流程也回到这个原则：
 
-1. `plan_frenet_path()` 先按原始 cost 选 raw best。
-2. node 层再调用 `_select_consistent_candidate()`。
-3. 如果上一帧有 `d(s)` profile，会在当前所有 hard-safe candidates 中做二次选择。
-4. 通过 `candidate_profile_consistency_weight` 惩罚与上一条通道差异大的候选。
-5. 如果 raw best 的 clearance 明显更好，可以打破通道连续性锁定。
+1. `plan_frenet_path()` 生成所有 hard-safe candidates。
+2. 每条候选只通过 `score_candidate()` 得到一个统一 cost。
+3. 按 cost 从低到高排序，直接选择第一条。
+4. clearance preference 已合并进 cost，不再通过二次筛选覆盖 raw best。
+5. temporal/profile consistency 和规划前 held path 已删除。
 
-目的：减少左右两侧候选在相邻帧之间跳变，降低蛇形。
+有当前 safe candidate 时，红色最终路径只由硬过滤和主 cost 决定；reuse 只保留为当前周期无解后的安全兜底，避免 hold、二次选择和正常规划结果同时抢最终输出。
 
 ### 9. 增加了中心线威胁检测和激活状态机
 
@@ -390,16 +390,7 @@ P8/P9/P22 主要讲规划，不含当前控制闭环。
 | `reference_closed_loop` | `true` | 参考线是否闭环 |
 | `projection_search_window_m` | `6.0` | `project_near` 局部投影窗口 |
 | `debug_max_safe_candidates` | `12` | RViz 显示的最多安全候选 |
-| `reuse_last_candidate_timeout_s` | `1.0` | 上一条候选复用时间窗口 |
-| `held_path_replan_clearance_m` | `0.22` | 复用轨迹低于该 clearance 时重规划 |
-| `held_path_min_remaining_m` | `2.0` | 复用轨迹最小剩余长度 |
-| `held_path_max_lateral_error_m` | `0.45` | 复用轨迹允许最大横向误差 |
-| `held_path_max_heading_error_rad` | `0.85` | 复用轨迹允许最大航向误差 |
-| `candidate_profile_consistency_weight` | `20.0` | 候选通道连续性权重 |
-| `candidate_profile_max_jump_m` | `0.35` | profile 最大跳变阈值 |
-| `candidate_profile_lookahead_m` | `4.0` | profile 连续性比较前瞻距离 |
-| `candidate_profile_unlock_clearance_gain_m` | `0.12` | raw best 多出多少 clearance 可打破连续性 |
-| `candidate_channel_memory_timeout_s` | `1.5` | 通道记忆保留时间 |
+| `reuse_last_candidate_timeout_s` | `1.0` | 当前周期无安全候选时，上一条候选允许兜底复用的时间窗口 |
 | `stop_path_length_m` | `2.0` | stop path 长度 |
 | `min_published_path_length_m` | `0.75` | 发布路径最小长度 |
 | `published_path_lookahead_m` | `0.25` | 发布路径锚定前瞻 |
@@ -465,7 +456,7 @@ P8/P9/P22 主要讲规划，不含当前控制闭环。
 
 ## 哪些逻辑最容易让人觉得混乱
 
-1. `plan_frenet_path()` 是纯候选生成和硬过滤，但 node 层又会做复用、连续性选择、裁剪和 stop fallback。看代码时要分清“规划核心”和“ROS 状态机”。
+1. `plan_frenet_path()` 是纯候选生成、硬过滤和 cost 排序；node 层只负责激活状态机、无解复用、裁剪发布和 stop fallback。看代码时要分清“规划核心”和“ROS 状态机”。
 
 2. `safe_clearance_m` 和 `min_clearance_m` 不是一回事：
    - `min_clearance_m` 是硬过滤阈值。
@@ -494,4 +485,3 @@ P8/P9/P22 主要讲规划，不含当前控制闭环。
 4. `OccupancyGrid.query_path()`：理解当前碰撞检测为什么比手写稿复杂。
 5. `FrenetStaticObstaclePlanner.plan_once()`：理解什么时候中心线、什么时候 approach、什么时候 Frenet、什么时候 stop。
 6. `LqrController.control_once()` 和 `compute_lqr_steering()`：理解规划出的路径最后怎么变成转向和速度。
-
