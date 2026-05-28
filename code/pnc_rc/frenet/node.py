@@ -65,6 +65,16 @@ def yaw_to_quaternion(yaw: float) -> tuple[float, float]:
     return math.sin(0.5 * yaw), math.cos(0.5 * yaw)
 
 
+def _occupancy_grid_data_to_map_occupied(
+    data: list[int] | tuple[int, ...] | np.ndarray,
+    height: int,
+    width: int,
+) -> np.ndarray:
+    """把 `/map` 的一维 OccupancyGrid 数据转为地图占据数组。"""
+    grid = np.asarray(data, dtype=np.int16).reshape((height, width))
+    return np.flipud(grid >= 50)
+
+
 class FrenetStaticObstaclePlanner(Node):
     """发布用于静态障碍避障的 Frenet 局部轨迹。
 
@@ -420,10 +430,11 @@ class FrenetStaticObstaclePlanner(Node):
         Returns:
             None。地图只在首次加载时打印一次统计日志。
         """
-        data = np.asarray(msg.data, dtype=np.int16).reshape(
-            (msg.info.height, msg.info.width)
+        self.map_occupied = _occupancy_grid_data_to_map_occupied(
+            msg.data,
+            int(msg.info.height),
+            int(msg.info.width),
         )
-        self.map_occupied = np.flipud(data >= 50)
         self.map_resolution = float(msg.info.resolution)
         self.map_origin_xy = (
             float(msg.info.origin.position.x),
@@ -1089,6 +1100,9 @@ class FrenetStaticObstaclePlanner(Node):
             ),
             # 期望安全裕度；raw best 达到该裕度才允许用 higher_clearance 解锁。
             safe_clearance_m=self.planner_config.safe_clearance,
+            min_consistency_clearance_m=self.held_path_replan_clearance_m,
+            safety_priority_clearance_gain_m=0.05,
+            safety_priority_min_candidates=5,
         )
         # raw_cost 是不含 temporal/profile 惩罚的原始代价。
         raw_cost = float(best_candidate.cost)
@@ -1124,6 +1138,20 @@ class FrenetStaticObstaclePlanner(Node):
                 )
             # 明确返回 raw best，而不是 selected。
             return best_candidate
+        if selection_reason == "safety_priority":
+            if now - self.last_candidate_selection_log_time >= 0.5:
+                self.last_candidate_selection_log_time = now
+                self.get_logger().info(
+                    "Selecting safety-priority Frenet candidate "
+                    f"(raw_d={float(best_candidate.d[-1]):.2f}, "
+                    f"selected_d={float(selected.d[-1]):.2f}, "
+                    f"raw_cost={raw_cost:.2f}, "
+                    f"selected_cost={selected_cost:.2f}, "
+                    f"raw_clearance={float(best_candidate.min_clearance_m):.2f}m, "
+                    f"selected_clearance={float(selected.min_clearance_m):.2f}m, "
+                    f"safe_clearance={float(self.planner_config.safe_clearance):.2f}m)."
+                )
+            return selected
         # 如果二次选择真的替换了 raw best，就打印一次解释日志。
         if selected is not best_candidate and now - self.last_candidate_selection_log_time >= 0.5:
             # 更新日志时间戳。

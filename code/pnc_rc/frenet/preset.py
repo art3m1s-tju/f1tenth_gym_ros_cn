@@ -315,22 +315,22 @@ def compute_frenet_preset(target_speed: float, avoidance_speed: float) -> Frenet
     target = float(target_speed)
     avoidance = float(avoidance_speed)
     geom_target = max(1.2, target, avoidance)
-    v_min = max(0.6, min(avoidance * 0.7, target * 0.5, geom_target))
+    v_min = 0.0 if target >= 2.0 else max(0.3, min(avoidance * 0.7, target * 0.5, geom_target))
     v_max = max(1.8, geom_target * 1.25, avoidance * 1.5)
     return FrenetPreset(
         geometry_target_speed=geom_target,
         v_min=v_min,
         v_max=v_max,
-        v_step=0.75 if target >= 2.0 else 0.6,
-        d_step=0.35 if target >= 2.0 else 0.3,
+        v_step=0.80 if target >= 2.0 else 0.6,
+        d_step=0.10 if target >= 2.0 else 0.3,
         trajectory_dt=0.10 if target >= 2.0 else 0.05,
         grid_forward_m=max(10.0, target * 6.0 + 2.0),
-        hold_replan_clearance_m=0.10 if target >= 2.0 else 0.20,
+        hold_replan_clearance_m=0.30 if target >= 2.0 else 0.20,
         hold_min_remaining_m=max(0.80, min(1.25, target * 0.30)),
         reuse_timeout_s=2.0 if target >= 2.0 else 1.0,
-        activation_max_m=max(8.0, 2.5 + target * 2.7),
-        activation_reaction_s=1.2 if target >= 2.0 else 1.0,
-        approach_extra_m=float(max(0.40, min(0.90, target * 0.25))),
+        activation_max_m=max(12.0, 2.5 + target * 4.5),
+        activation_reaction_s=2.5 if target >= 2.0 else 1.0,
+        approach_extra_m=float(max(0.50, min(1.50, target * 0.50))),
         activation_path_margin_m=1.25,
         centerline_return_lookahead_m=float(
             min(3.5, max(2.0, 1.5 + 2.0 * target / 3.0))
@@ -362,9 +362,9 @@ def frenet_static_test_launch_args(
         f"frenet_v_min:={preset.v_min:.3f}",
         f"frenet_v_max:={preset.v_max:.3f}",
         f"frenet_v_step:={preset.v_step:.3f}",
-        "frenet_t_min:=4.0",
-        "frenet_t_max:=6.0",
-        "frenet_t_step:=2.0",
+        "frenet_t_min:=1.0",
+        "frenet_t_max:=3.0",
+        "frenet_t_step:=1.0",
         f"frenet_trajectory_dt:={preset.trajectory_dt:.3f}",
         "frenet_d_min:=-1.8",
         "frenet_d_max:=1.8",
@@ -378,13 +378,13 @@ def frenet_static_test_launch_args(
         "frenet_max_curvature:=1.14",
         "frenet_weight_curvature:=0.4",
         "frenet_weight_curvature_rate:=8.0",
-        "frenet_corridor_radius_m:=0.20",
+        "frenet_corridor_radius_m:=0.22",
         "frenet_corridor_sample_step_m:=0.05",
         "frenet_path_collision_sample_step_m:=0.05",
         "frenet_footprint_front_m:=0.45",
         "frenet_footprint_rear_m:=0.05",
-        "frenet_safe_clearance_m:=0.30",
-        "frenet_min_clearance_m:=0.06",
+        "frenet_safe_clearance_m:=0.40",
+        "frenet_min_clearance_m:=0.12",
         "frenet_published_path_lookahead_m:=0.25",
         f"frenet_max_published_path_length_m:={preset.max_published_path_length_m:.3f}",
         "frenet_min_path_publish_interval_s:=0.25",
@@ -394,7 +394,7 @@ def frenet_static_test_launch_args(
             "frenet_centerline_return_lookahead_m:="
             f"{preset.centerline_return_lookahead_m:.3f}"
         ),
-        "frenet_centerline_threat_lookahead_m:=8.0",
+        "frenet_centerline_threat_lookahead_m:=18.0",
         "frenet_centerline_threat_corridor_radius_m:=0.22",
         "frenet_activation_min_lookahead_m:=3.0",
         f"frenet_activation_max_lookahead_m:={preset.activation_max_m:.3f}",

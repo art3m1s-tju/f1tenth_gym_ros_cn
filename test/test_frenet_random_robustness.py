@@ -20,13 +20,16 @@ def test_compute_frenet_preset_scales_high_speed_parameters():
     preset = compute_frenet_preset(3.0, 1.2)
 
     assert math.isclose(preset.geometry_target_speed, 3.0)
-    assert math.isclose(preset.v_min, 0.84)
+    assert math.isclose(preset.v_min, 0.0)
+    assert math.isclose(preset.v_step, 0.80)
+    assert math.isclose(preset.d_step, 0.10)
     assert preset.grid_forward_m == 20.0
     assert preset.activation_max_m > 8.0
-    assert math.isclose(preset.approach_extra_m, 0.75)
+    assert math.isclose(preset.approach_extra_m, 1.50)
     assert math.isclose(preset.activation_path_margin_m, 1.25)
     assert math.isclose(preset.centerline_return_lookahead_m, 3.5)
     assert preset.reuse_timeout_s == 2.0
+    assert math.isclose(preset.hold_replan_clearance_m, 0.30)
     assert math.isclose(preset.hold_min_remaining_m, 0.90)
     assert math.isclose(preset.max_published_path_length_m, 6.6)
 
@@ -60,6 +63,16 @@ def test_build_launch_cmd_can_enable_rviz(tmp_path):
     assert all(arg in cmd for arg in frenet_static_test_launch_args(preset, 1.2))
     assert "frenet_centerline_return_lookahead_m:=3.500" in cmd
     assert "frenet_max_published_path_length_m:=6.600" in cmd
+    assert "frenet_d_step:=0.100" in cmd
+    assert "frenet_t_min:=1.0" in cmd
+    assert "frenet_t_max:=3.0" in cmd
+    assert "frenet_t_step:=1.0" in cmd
+    assert "frenet_v_min:=0.000" in cmd
+    assert "frenet_v_step:=0.800" in cmd
+    assert "frenet_safe_clearance_m:=0.40" in cmd
+    assert "frenet_min_clearance_m:=0.12" in cmd
+    assert "frenet_corridor_radius_m:=0.22" in cmd
+    assert "frenet_centerline_threat_lookahead_m:=18.0" in cmd
     assert "frenet_candidate_profile_max_jump_m:=0.35" in cmd
 
 

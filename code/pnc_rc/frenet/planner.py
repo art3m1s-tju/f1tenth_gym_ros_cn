@@ -548,6 +548,9 @@ def select_temporally_consistent_candidate(
     profile_lookahead_m: float = 0.0,
     profile_unlock_clearance_gain_m: float = 0.0,
     safe_clearance_m: float,
+    min_consistency_clearance_m: float = 0.0,
+    safety_priority_clearance_gain_m: float = 0.05,
+    safety_priority_min_candidates: int = 0,
     max_cost_gap: float = 3.0,
 ) -> tuple[CandidatePath, str]:
     """用单一 adjusted cost 在 safe candidates 中选择横向连续轨迹。
@@ -568,6 +571,11 @@ def select_temporally_consistent_candidate(
         profile_unlock_clearance_gain_m: raw best 至少提升这么多 clearance 才允许
             忽略连续性惩罚，单位 m。
         safe_clearance_m: 期望安全裕度，单位 m。
+        min_consistency_clearance_m: 连续性候选允许被选中的最低 clearance，单位 m。
+        safety_priority_clearance_gain_m: raw best 至少多出这么多 clearance，且
+            连续性候选低于 safe clearance 时，直接保留 raw best。
+        safety_priority_min_candidates: safe candidate 数量低于该值时，关闭连续性
+            偏好，直接按 clearance 优先选择。
         max_cost_gap: 连续性选择相对 raw best 允许增加的最大原始 cost。
 
     Returns:
@@ -576,6 +584,22 @@ def select_temporally_consistent_candidate(
     # 没有 safe candidates 时无法二次选择，直接保留 raw best。
     if not safe_candidates:
         return best_candidate, "raw"
+    best_clearance_candidate = max(
+        safe_candidates,
+        key=lambda candidate: (
+            float(candidate.min_clearance_m),
+            -float(candidate.cost),
+        ),
+    )
+    best_clearance = float(best_clearance_candidate.min_clearance_m)
+    expected_clearance = max(0.0, float(safe_clearance_m))
+    min_consistency_clearance = max(0.0, float(min_consistency_clearance_m))
+    min_candidates_for_consistency = max(0, int(safety_priority_min_candidates))
+    if (
+        min_candidates_for_consistency > 0
+        and len(safe_candidates) < min_candidates_for_consistency
+    ) or best_clearance < expected_clearance:
+        return best_clearance_candidate, "safety_priority"
 
     # 整条 d(s) profile 连续性权重；用于抑制同侧内部左右摆动。
     profile_weight = max(0.0, float(profile_consistency_weight))
@@ -660,12 +684,29 @@ def select_temporally_consistent_candidate(
     # 如果 selected 不是 raw best，但 raw best 明显更安全，则允许打破连续性选择。
     if (
         selected is not best_candidate
-        and raw_outside_channel
+        and (
+            raw_outside_channel
+            or float(selected.min_clearance_m) < expected_clearance
+        )
         and clearance_gain >= unlock_clearance_gain
         and float(best_candidate.min_clearance_m) >= float(safe_clearance_m)
     ):
         # 返回 higher_clearance，node 层会记录“为了安全裕度保留 raw best”。
         return best_candidate, "higher_clearance"
+
+    safety_clearance_gain = max(0.0, float(safety_priority_clearance_gain_m))
+    if (
+        selected is not best_candidate
+        and clearance_gain >= safety_clearance_gain
+        and float(selected.min_clearance_m) < expected_clearance
+    ):
+        return best_candidate, "safety_priority"
+    if (
+        selected is not best_candidate
+        and min_consistency_clearance > 0.0
+        and float(selected.min_clearance_m) < min_consistency_clearance
+    ):
+        return best_candidate, "safety_priority"
 
     # 原始 cost 是 plan_frenet_path() 算出的基础代价，不含 temporal/profile 惩罚。
     raw_cost = float(best_candidate.cost)

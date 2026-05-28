@@ -36,6 +36,7 @@ from pnc_rc.frenet.planner import (
     trim_path_to_position,
     truncate_path_length,
     _forward_progress_planning_state,
+    _sample_range,
 )
 
 
@@ -962,6 +963,77 @@ def test_temporal_selection_unlocks_for_clearance_gain():
     assert reason == "higher_clearance"
 
 
+def test_temporal_selection_uses_safety_priority_when_clearance_is_marginal():
+    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
+    safer_jump = _candidate_with_d(
+        1.4,
+        cost=1.0,
+        clearance=0.21,
+        s_profile=previous_s,
+        d_profile=np.array([0.35, 0.9, 1.2, 1.4], dtype=float),
+    )
+    same_channel = _candidate_with_d(
+        0.52,
+        cost=1.2,
+        clearance=0.12,
+        s_profile=previous_s,
+        d_profile=np.array([0.34, 0.43, 0.48, 0.52], dtype=float),
+    )
+
+    selected, reason = select_temporally_consistent_candidate(
+        safer_jump,
+        [safer_jump, same_channel],
+        previous_s_profile=previous_s,
+        previous_d_profile=previous_d,
+        profile_consistency_weight=20.0,
+        profile_max_jump_m=0.35,
+        profile_lookahead_m=3.0,
+        profile_unlock_clearance_gain_m=0.12,
+        safe_clearance_m=0.40,
+        min_consistency_clearance_m=0.20,
+        safety_priority_clearance_gain_m=0.05,
+    )
+
+    assert selected is safer_jump
+    assert reason == "safety_priority"
+
+
+def test_temporal_selection_uses_highest_clearance_when_candidate_set_is_sparse():
+    previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
+    low_cost = _candidate_with_d(
+        0.4,
+        cost=1.0,
+        clearance=0.18,
+        s_profile=previous_s,
+        d_profile=np.array([0.34, 0.38, 0.4, 0.4], dtype=float),
+    )
+    safer = _candidate_with_d(
+        1.0,
+        cost=3.0,
+        clearance=0.28,
+        s_profile=previous_s,
+        d_profile=np.array([0.35, 0.7, 0.9, 1.0], dtype=float),
+    )
+
+    selected, reason = select_temporally_consistent_candidate(
+        low_cost,
+        [low_cost, safer],
+        previous_s_profile=previous_s,
+        previous_d_profile=previous_d,
+        profile_consistency_weight=20.0,
+        profile_max_jump_m=0.35,
+        profile_lookahead_m=3.0,
+        profile_unlock_clearance_gain_m=0.12,
+        safe_clearance_m=0.40,
+        safety_priority_min_candidates=5,
+    )
+
+    assert selected is safer
+    assert reason == "safety_priority"
+
+
 def test_temporal_selection_keeps_raw_best_when_raw_cost_gap_is_too_high():
     previous_s = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
     previous_d = np.array([0.35, 0.40, 0.42, 0.45], dtype=float)
@@ -994,6 +1066,13 @@ def test_temporal_selection_keeps_raw_best_when_raw_cost_gap_is_too_high():
 
     assert selected is raw_best
     assert reason == "lower_cost"
+
+
+def test_sample_range_supports_fine_lateral_and_low_speed_candidates():
+    assert np.isclose(_sample_range(-1.8, 1.8, 0.1)[0], -1.8)
+    assert len(_sample_range(-1.8, 1.8, 0.1)) == 37
+    assert np.isclose(_sample_range(0.0, 3.75, 0.3)[0], 0.0)
+    assert np.isclose(_sample_range(0.0, 3.75, 0.3)[1], 0.3)
 
 
 def test_reference_path_open_mode_does_not_wrap_at_endpoint():
