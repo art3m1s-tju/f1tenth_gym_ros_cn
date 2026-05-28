@@ -218,7 +218,45 @@ Seed `004`、`005`、`009` 虽然完成了 3 圈，但出现过短暂 no-safe fa
 - `candidate_fast_early_seed000`：增大 threat/activation lookahead 后不再碰撞，但仍会在第一处障碍前进入长期 no-safe 停车。
 - `candidate_fast_t4_seed000`：把 `T` 扩到 `1.0..4.0s` 可增加可行候选，但单周期耗时回到 `1.3s+`，第一条轨迹发布时车辆已接近障碍，跟踪误差放大并碰撞。
 
-当前结论是：单靠参数在“实时性”和“可行绕障空间”之间出现明显拉扯。`T<=3s` 实时性较好但容易近障无解，`T=4s` 可行性提升但 CPU/Python 耗时过长。下一步应尝试把候选轨迹生成阶段先做 CUDA/Numba 原型，验证高密度轨迹束是否能在不牺牲实时性的情况下保留更长时域和更细横向采样。碰撞检测暂时不搬到 CUDA，避免一次性改动过大。
+当前结论是：单靠参数在“实时性”和“可行绕障空间”之间出现明显拉扯。`T<=3s` 实时性较好但容易近障无解，`T=4s` 可行性提升但 CPU/Python 耗时过长。下一步先不引入 CUDA，把候选轨迹生成和主循环中低风险的逐点 Python 逻辑改为 NumPy 向量化，先确认 CPU 路径还能释放多少实时性余量。
+
+### 2026-05-28 追加诊断：回滚 CUDA 原型，改走 CPU NumPy 向量化
+
+当前 CUDA/Numba 原型已移除，代码中不再保留 `FRENET_USE_CUDA`、`cuda`、`numba` 等开关或依赖。现阶段优化方向改为 CPU NumPy 向量化，避免在当前容器没有 CUDA 设备的情况下引入额外部署复杂度。
+
+已完成的向量化改动：
+
+- 候选 Frenet 多项式 profile 生成改为批量 NumPy 计算，候选顺序保持原来的 `d_final -> duration -> speed_final`。
+- `plan_frenet_path()` 先批量计算 progress mask，再只遍历满足前进性硬约束的候选，减少无效候选后续几何检查。
+- `ReferencePath.sample_many()` 批量执行 `(s, d) -> xy` 采样，替代候选内部逐点调用 `reference.sample()`。
+- `estimate_heading_jumps()` 改为 `np.diff()` 加 `atan2(sin, cos)`，去掉航向差上的 Python list comprehension。
+
+轨迹 profile 生成 benchmark：
+
+```bash
+docker run --rm --entrypoint /bin/bash \
+  -v /home/art3m1s/f1tenth_frenet_static_avoidance:/sim_ws/src/f1tenth_gym_ros \
+  -w /sim_ws/src/f1tenth_gym_ros \
+  f1tenth_gym_ros:latest \
+  -lc 'source /opt/ros/foxy/setup.bash && python3 code/bench_frenet_trajectory_generation.py --repeat 50'
+```
+
+结果：
+
+- candidate grid: `d=37, T=3, v=6, total=666`
+- scalar Python profile generation: `16.853 ms +/- 3.400`
+- NumPy batch profile generation: `0.769 ms +/- 0.057`
+- speedup: `21.93x`
+
+验证：
+
+- `test/test_frenet_planner.py`
+- `test/test_frenet_random_robustness.py`
+- `test/test_frenet_node.py`
+- `test/test_frenet_trajectory_generation.py`
+- 结果：`51 passed`
+
+剩余瓶颈判断：profile 生成已经不是主要问题。下一步真正影响整帧规划耗时的地方大概率是每条候选的 `occupancy.query_path()`，其中包含路径加密、扫掠通道采样、坐标转换、栅格碰撞和 clearance 查询。后续如果还要继续提速，应优先设计批量 `query_paths`，一次处理多条候选并按候选分组汇总 collision/min_clearance。
 
 1. 增加停车近障碍物时的 recovery mode。
 

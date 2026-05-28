@@ -37,6 +37,7 @@ from pnc_rc.frenet.planner import (
     truncate_path_length,
     _forward_progress_planning_state,
     _sample_range,
+    _valid_progress_profile_mask,
 )
 
 
@@ -138,6 +139,31 @@ def test_reference_path_projection_and_sampling_round_trip():
     reconstructed, _, _ = reference.sample(s, d)
 
     assert np.linalg.norm(original - reconstructed) < 0.02
+
+
+def test_reference_path_sample_many_matches_scalar_sampling():
+    theta = np.linspace(0.0, 2.0 * math.pi, 80, endpoint=False)
+    points = np.column_stack([3.0 * np.cos(theta), 3.0 * np.sin(theta)])
+    reference = ReferencePath.from_points(points)
+    s_values = np.array([-0.2, 0.0, 1.3, reference.total_length + 0.4])
+    d_values = np.array([0.0, 0.15, -0.2, 0.3])
+
+    batched_points, batched_headings, batched_curvatures = reference.sample_many(
+        s_values,
+        d_values,
+    )
+    scalar_samples = [reference.sample(s, d) for s, d in zip(s_values, d_values)]
+    scalar_points = np.array([sample[0] for sample in scalar_samples])
+    scalar_headings = np.array([sample[1] for sample in scalar_samples])
+    scalar_curvatures = np.array([sample[2] for sample in scalar_samples])
+    heading_error = np.arctan2(
+        np.sin(batched_headings - scalar_headings),
+        np.cos(batched_headings - scalar_headings),
+    )
+
+    assert np.allclose(batched_points, scalar_points)
+    assert np.allclose(heading_error, 0.0)
+    assert np.allclose(batched_curvatures, scalar_curvatures)
 
 
 def test_occupancy_grid_inflates_scan_obstacle():
@@ -285,6 +311,33 @@ def test_heading_jump_estimator_detects_reversal():
 
     assert len(jumps) == 2
     assert np.max(np.abs(jumps)) > math.pi / 3.0
+
+
+def test_vectorized_progress_mask_matches_scalar_filter():
+    config = FrenetPlannerConfig(min_progress_step_m=0.2)
+    s_profiles = np.array(
+        [
+            [0.0, 0.1, 0.25, 0.4],
+            [0.0, 0.1, 0.15, 0.18],
+            [0.0, 0.2, 0.15, 0.3],
+            [0.0, 0.1, 0.3, 0.6],
+        ],
+        dtype=float,
+    )
+    s_dot_profiles = np.array(
+        [
+            [0.5, 0.4, 0.3, 0.2],
+            [0.5, 0.4, 0.3, 0.2],
+            [0.5, 0.4, 0.3, 0.2],
+            [0.5, -0.1, 0.3, 0.2],
+        ],
+        dtype=float,
+    )
+    lengths = np.array([4, 4, 4, 3], dtype=int)
+
+    mask = _valid_progress_profile_mask(s_profiles, s_dot_profiles, lengths, config)
+
+    assert mask.tolist() == [True, False, False, False]
 
 
 def test_open_path_curvature_ignores_near_duplicate_start_samples():

@@ -8,6 +8,8 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import KDTree
 
+from pnc_rc.frenet.trajectory_generation import generate_candidate_profiles
+
 from pnc_rc.lqr.geometry import (
     PathProjection,
     advance_projection_along_path,
@@ -280,6 +282,65 @@ class ReferencePath:
         )
         normal = np.array([-math.sin(heading), math.cos(heading)])
         return point + d * normal, heading, curvature
+
+    def sample_many(
+        self,
+        s_values: np.ndarray,
+        d_values: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """批量从 Frenet 坐标采样世界坐标。
+
+        Args:
+            s_values: 参考线弧长数组，单位 m。
+            d_values: 横向偏移数组，单位 m。
+
+        Returns:
+            `(points, headings, curvatures)`。`points` 形状为 `(N, 2)`。
+        """
+        s_array = np.asarray(s_values, dtype=float).reshape(-1)
+        d_array = np.asarray(d_values, dtype=float).reshape(-1)
+        if len(s_array) != len(d_array):
+            raise ValueError("s_values and d_values must have the same length")
+        if len(s_array) == 0:
+            return (
+                np.empty((0, 2), dtype=float),
+                np.empty(0, dtype=float),
+                np.empty(0, dtype=float),
+            )
+        if self.closed_loop:
+            sampled_s = np.mod(s_array, self.total_length)
+        else:
+            sampled_s = np.clip(s_array, 0.0, self.total_length)
+        segment_idx = np.searchsorted(self.cumulative_s, sampled_s, side="right") - 1
+        max_segment_idx = len(self.points) - 1 if self.closed_loop else len(self.points) - 2
+        segment_idx = np.clip(segment_idx, 0, max_segment_idx).astype(int)
+        segment_lengths = self.segment_lengths[segment_idx]
+        t = np.divide(
+            sampled_s - self.cumulative_s[segment_idx],
+            segment_lengths,
+            out=np.zeros_like(sampled_s),
+            where=segment_lengths > 1e-9,
+        )
+        next_idx = (
+            (segment_idx + 1) % len(self.points)
+            if self.closed_loop
+            else np.minimum(segment_idx + 1, len(self.points) - 1)
+        )
+        base_points = self.points[segment_idx] + t[:, None] * (
+            self.points[next_idx] - self.points[segment_idx]
+        )
+        heading_start = self.headings[segment_idx]
+        heading_delta = np.arctan2(
+            np.sin(self.headings[next_idx] - heading_start),
+            np.cos(self.headings[next_idx] - heading_start),
+        )
+        headings = np.arctan2(
+            np.sin(heading_start + t * heading_delta),
+            np.cos(heading_start + t * heading_delta),
+        )
+        curvatures = (1.0 - t) * self.curvatures[segment_idx] + t * self.curvatures[next_idx]
+        normals = np.column_stack([-np.sin(headings), np.cos(headings)])
+        return base_points + d_array[:, None] * normals, headings, curvatures
 
     def _projection_to_frenet(
         self,
@@ -1038,109 +1099,106 @@ def plan_frenet_path(
     candidates: list[CandidatePath] = []
     # 过滤里程计/投影估计出来的异常纵向加速度，避免多项式初值不稳定。
     planning_state = _forward_progress_planning_state(state, config)
-    # 第一层采样：枚举横向终点 d_final，也就是候选最终想停在中心线哪一侧。
-    for d_final in _sample_range(config.d_min, config.d_max, config.d_step):
-        # 第二层采样：枚举轨迹时长，时长越长通常越平滑但响应越慢。
-        for duration in _sample_range(config.t_min, config.t_max, config.t_step):
-            # 横向轨迹用五次多项式，约束起点 d/d_dot/d_ddot 和终点 d/d_dot=0/d_ddot=0。
-            d_coeff = solve_quintic_lateral(planning_state, d_final, duration)
-            # 用固定 dt 把连续多项式离散成候选轨迹点，末端加半个 dt 保证包含终点附近。
-            time_values = np.arange(
-                0.0,
-                duration + 0.5 * config.trajectory_dt,
-                config.trajectory_dt,
-            )
-            # 预先算横向位置、横向速度和横向 jerk；这些与终点速度无关，可复用。
-            d_values, d_dot_values, _, d_jerk_values = evaluate_quintic(d_coeff, time_values)
-            # 第三层采样：枚举纵向终点速度，决定这条候选快慢。
-            for speed_final in _sample_range(config.v_min, config.v_max, config.v_step):
-                # 统计总候选数，方便日志判断是采样太少还是过滤太严。
-                if stats is not None:
-                    stats.total_candidates += 1
-                # 纵向轨迹用四次多项式，约束起点 s/s_dot/s_ddot 和终点 s_dot/s_ddot。
-                s_coeff = solve_quartic_longitudinal(planning_state, speed_final, duration)
-                # 计算纵向位置、速度和 jerk；速度用于前进性检查，jerk 用于 cost。
-                s_values, s_dot_values, _, s_jerk_values = evaluate_quartic(s_coeff, time_values)
-                # 硬过滤 1：候选必须一直前进，不能倒退，且总前进距离不能太短。
-                progress_ok = _has_valid_progress_profile(
-                    s_values,
-                    s_dot_values,
-                    config,
-                )
-                # 前进性不满足就直接丢弃，避免生成原地打转/倒车轨迹。
-                if not progress_ok:
-                    # 记录被前进性过滤掉的数量。
-                    if stats is not None:
-                        stats.progress_rejections += 1
-                    continue
-                # 把 Frenet 坐标 (s, d) 转成世界坐标点，后续所有几何检查都在 xy 上做。
-                xy = np.array([reference.sample(s, d)[0] for s, d in zip(s_values, d_values)])
-                # 计算相邻路径点的航向变化，用来发现离散点之间的尖锐折角。
-                heading_jumps = estimate_heading_jumps(xy)
-                # 没有足够点时认为航向跳变为 0；否则取最大绝对跳变。
-                max_heading_jump = (
-                    float(np.max(np.abs(heading_jumps)))
-                    if len(heading_jumps)
-                    else 0.0
-                )
-                # 硬过滤 2：航向跳变太大说明轨迹形状突兀，LQR 跟踪会不稳定。
-                if max_heading_jump > config.max_heading_jump:
-                    # 记录航向跳变过滤数量。
-                    if stats is not None:
-                        stats.heading_rejections += 1
-                    continue
-                # 硬过滤 3：用局部占据栅格检查整条轨迹扫掠走廊是否碰撞，并取最小 clearance。
-                collision, min_clearance = occupancy.query_path(
-                    xy,
-                    vehicle_pose,
-                    config.corridor_radius_m,
-                    config.corridor_sample_step_m,
-                    config.footprint_front_m,
-                    config.footprint_rear_m,
-                    config.path_collision_sample_step_m,
-                )
-                # 记录当前所有候选里见过的最大 clearance，用于无解日志诊断。
-                if stats is not None:
-                    stats.best_clearance_m = max(stats.best_clearance_m, min_clearance)
-                # 只要扫掠走廊碰到占据栅格，直接丢弃。
-                if collision:
-                    # 记录碰撞过滤数量。
-                    if stats is not None:
-                        stats.collision_rejections += 1
-                    continue
-                # 硬过滤 4：没碰撞但离障碍太近，也直接丢弃。
-                if min_clearance < config.min_clearance_m:
-                    # 记录 clearance 过滤数量。
-                    if stats is not None:
-                        stats.clearance_rejections += 1
-                    continue
-                # 到这里说明候选已经通过安全硬约束，开始计算 soft cost。
-                scored_candidate = score_candidate(
-                    xy,
-                    s_values,
-                    d_values,
-                    s_dot_values,
-                    d_dot_values,
-                    d_jerk_values,
-                    s_jerk_values,
-                    duration,
-                    min_clearance,
-                    config,
-                )
-                # 硬过滤 5：曲率超过车辆可跟踪上限，直接丢弃。
-                if scored_candidate.max_curvature > config.max_curvature:
-                    # 记录曲率过滤数量。
-                    if stats is not None:
-                        stats.curvature_rejections += 1
-                    continue
-                # 到这里才算真正 safe candidate。
-                if stats is not None:
-                    stats.safe_candidates += 1
-                # 保存 safe candidate，后面按 cost 选 raw best。
-                candidates.append(scored_candidate)
-                # 如果调用方要 RViz debug，就把所有 safe candidates 也返回出去显示。
-                if debug_candidates is not None:
-                    debug_candidates.append(scored_candidate)
+    # 批量生成 Frenet 多项式 profile，避免在三层采样循环中反复调用
+    # evaluate_quartic/evaluate_quintic。
+    profiles = generate_candidate_profiles(
+        state_s=planning_state.s,
+        state_d=planning_state.d,
+        state_s_dot=planning_state.s_dot,
+        state_d_dot=planning_state.d_dot,
+        state_s_ddot=planning_state.s_ddot,
+        state_d_ddot=planning_state.d_ddot,
+        d_samples=_sample_range(config.d_min, config.d_max, config.d_step),
+        duration_samples=_sample_range(config.t_min, config.t_max, config.t_step),
+        speed_samples=_sample_range(config.v_min, config.v_max, config.v_step),
+        trajectory_dt=config.trajectory_dt,
+    )
+    candidate_count = len(profiles.d_finals)
+    if stats is not None:
+        stats.total_candidates += candidate_count
+    progress_mask = _valid_progress_profile_mask(
+        profiles.s_values,
+        profiles.s_dot_values,
+        profiles.lengths,
+        config,
+    )
+    if stats is not None:
+        stats.progress_rejections += int(candidate_count - np.count_nonzero(progress_mask))
+    for candidate_idx in np.flatnonzero(progress_mask):
+        length = int(profiles.lengths[candidate_idx])
+        d_values = profiles.d_values[candidate_idx, :length]
+        d_dot_values = profiles.d_dot_values[candidate_idx, :length]
+        d_jerk_values = profiles.d_jerk_values[candidate_idx, :length]
+        s_values = profiles.s_values[candidate_idx, :length]
+        s_dot_values = profiles.s_dot_values[candidate_idx, :length]
+        s_jerk_values = profiles.s_jerk_values[candidate_idx, :length]
+        duration = float(profiles.durations[candidate_idx])
+        # 把 Frenet 坐标 (s, d) 转成世界坐标点，后续所有几何检查都在 xy 上做。
+        xy, _, _ = reference.sample_many(s_values, d_values)
+        # 计算相邻路径点的航向变化，用来发现离散点之间的尖锐折角。
+        heading_jumps = estimate_heading_jumps(xy)
+        # 没有足够点时认为航向跳变为 0；否则取最大绝对跳变。
+        max_heading_jump = (
+            float(np.max(np.abs(heading_jumps))) if len(heading_jumps) else 0.0
+        )
+        # 硬过滤 2：航向跳变太大说明轨迹形状突兀，LQR 跟踪会不稳定。
+        if max_heading_jump > config.max_heading_jump:
+            # 记录航向跳变过滤数量。
+            if stats is not None:
+                stats.heading_rejections += 1
+            continue
+        # 硬过滤 3：用局部占据栅格检查整条轨迹扫掠走廊是否碰撞，并取最小 clearance。
+        collision, min_clearance = occupancy.query_path(
+            xy,
+            vehicle_pose,
+            config.corridor_radius_m,
+            config.corridor_sample_step_m,
+            config.footprint_front_m,
+            config.footprint_rear_m,
+            config.path_collision_sample_step_m,
+        )
+        # 记录当前所有候选里见过的最大 clearance，用于无解日志诊断。
+        if stats is not None:
+            stats.best_clearance_m = max(stats.best_clearance_m, min_clearance)
+        # 只要扫掠走廊碰到占据栅格，直接丢弃。
+        if collision:
+            # 记录碰撞过滤数量。
+            if stats is not None:
+                stats.collision_rejections += 1
+            continue
+        # 硬过滤 4：没碰撞但离障碍太近，也直接丢弃。
+        if min_clearance < config.min_clearance_m:
+            # 记录 clearance 过滤数量。
+            if stats is not None:
+                stats.clearance_rejections += 1
+            continue
+        # 到这里说明候选已经通过安全硬约束，开始计算 soft cost。
+        scored_candidate = score_candidate(
+            xy,
+            s_values,
+            d_values,
+            s_dot_values,
+            d_dot_values,
+            d_jerk_values,
+            s_jerk_values,
+            duration,
+            min_clearance,
+            config,
+        )
+        # 硬过滤 5：曲率超过车辆可跟踪上限，直接丢弃。
+        if scored_candidate.max_curvature > config.max_curvature:
+            # 记录曲率过滤数量。
+            if stats is not None:
+                stats.curvature_rejections += 1
+            continue
+        # 到这里才算真正 safe candidate。
+        if stats is not None:
+            stats.safe_candidates += 1
+        # 保存 safe candidate，后面按 cost 选 raw best。
+        candidates.append(scored_candidate)
+        # 如果调用方要 RViz debug，就把所有 safe candidates 也返回出去显示。
+        if debug_candidates is not None:
+            debug_candidates.append(scored_candidate)
     # 没有任何 safe candidate 时返回 None，node 层会决定 stop 或复用旧轨迹。
     if not candidates:
         return None
@@ -1432,10 +1490,8 @@ def estimate_heading_jumps(points: np.ndarray) -> np.ndarray:
     if np.count_nonzero(valid) < 2:
         return np.zeros(0, dtype=float)
     headings = np.arctan2(segment_vectors[valid, 1], segment_vectors[valid, 0])
-    return np.array(
-        [wrap_angle(float(curr - prev)) for prev, curr in zip(headings[:-1], headings[1:])],
-        dtype=float,
-    )
+    jumps = np.diff(headings)
+    return np.arctan2(np.sin(jumps), np.cos(jumps))
 
 
 def swept_corridor_points(
@@ -1801,6 +1857,45 @@ def _has_valid_progress_profile(
     if total_progress < config.min_progress_step_m:
         return False
     return True
+
+
+def _valid_progress_profile_mask(
+    s_profiles: np.ndarray,
+    s_dot_profiles: np.ndarray,
+    lengths: np.ndarray,
+    config: FrenetPlannerConfig,
+) -> np.ndarray:
+    """批量检查候选纵向轨迹是否满足前进性硬约束。"""
+    s_array = np.asarray(s_profiles, dtype=float)
+    s_dot_array = np.asarray(s_dot_profiles, dtype=float)
+    length_array = np.asarray(lengths, dtype=int)
+    candidate_count = len(length_array)
+    if candidate_count == 0:
+        return np.zeros(0, dtype=bool)
+    if s_array.ndim != 2 or s_dot_array.shape != s_array.shape:
+        raise ValueError("s_profiles and s_dot_profiles must have matching 2D shapes")
+
+    sample_count = s_array.shape[1]
+    sample_indices = np.arange(sample_count)[None, :]
+    valid_points = sample_indices < length_array[:, None]
+    negative_speed = np.any((s_dot_array < -1e-6) & valid_points, axis=1)
+
+    if sample_count > 1:
+        step_indices = np.arange(sample_count - 1)[None, :]
+        valid_steps = step_indices < (length_array[:, None] - 1)
+        backward_step = np.any((np.diff(s_array, axis=1) < -1e-6) & valid_steps, axis=1)
+    else:
+        backward_step = np.zeros(candidate_count, dtype=bool)
+
+    row_indices = np.arange(candidate_count)
+    last_indices = np.maximum(length_array - 1, 0)
+    total_progress = np.where(
+        length_array > 0,
+        s_array[row_indices, last_indices] - s_array[row_indices, 0],
+        0.0,
+    )
+    enough_progress = total_progress >= config.min_progress_step_m
+    return (~negative_speed) & (~backward_step) & enough_progress
 
 
 def _forward_progress_planning_state(
